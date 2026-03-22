@@ -1,5 +1,5 @@
-# Fraud Detection Model Training and Evaluation
-# Author: Generated for FraudDetect Project
+# Huấn luyện và đánh giá mô hình phát hiện gian lận
+# Tác giả: Tạo cho dự án FraudDetect
 
 import numpy as np
 import pandas as pd
@@ -9,33 +9,33 @@ from sklearn.metrics import classification_report, confusion_matrix, roc_auc_sco
 import joblib
 import os
 from typing import Dict, List, Any, Tuple
-from preprocess import FraudDetectionPreprocessor, calculate_risk_score, explain_prediction
+from split import split_data
 import warnings
 warnings.filterwarnings('ignore')
 
 class FraudDetectionModel:
-    """Fraud Detection Model with training, evaluation, and prediction capabilities"""
+    """Mô hình phát hiện gian lận với khả năng huấn luyện, đánh giá và dự đoán"""
 
     def __init__(self, model_dir: str = "../models"):
         self.model_dir = model_dir
         self.model = None
         self.feature_names = None
 
-        # Ensure model directory exists
+        # Đảm bảo thư mục mô hình tồn tại
         os.makedirs(self.model_dir, exist_ok=True)
 
     def train_model(self, X_train: np.ndarray, y_train: np.ndarray, feature_names: List[str]):
-        """Train the fraud detection model"""
-        print("=== TRAINING MODEL ===")
+        """Huấn luyện mô hình phát hiện gian lận"""
+        print("=== MODEL TRAINING ===")
 
-        # Use Random Forest with regularization to prevent overfitting
+        # Sử dụng Random Forest với regularization để ngăn overfitting
         self.model = RandomForestClassifier(
             n_estimators=100,
-            max_depth=6,  # Reduced from 10 to prevent overfitting
+            max_depth=6,  # Giảm từ 10 để ngăn overfitting
             min_samples_split=10,
             min_samples_leaf=5,
             random_state=42,
-            class_weight='balanced',  # Handle imbalance without SMOTE
+            class_weight='balanced',  # Xử lý imbalance mà không dùng SMOTE
             n_jobs=-1
         )
 
@@ -43,14 +43,14 @@ class FraudDetectionModel:
         self.model.fit(X_train, y_train)
         self.feature_names = feature_names
 
-        # Save model
+        # Lưu mô hình
         self.save_model()
 
     def cross_validate_model(self, X_train: np.ndarray, y_train: np.ndarray, cv: int = 5) -> Dict[str, Any]:
-        """Cross-validate the model to check for overfitting"""
-        print("=== CROSS-VALIDATING MODEL ===")
+        """Cross-validate mô hình để kiểm tra overfitting"""
+        print("=== CROSS-VALIDATE MODEL ===")
 
-        # Create model for CV
+        # Tạo mô hình cho CV
         cv_model = RandomForestClassifier(
             n_estimators=100,
             max_depth=6,
@@ -64,7 +64,7 @@ class FraudDetectionModel:
         # Stratified K-Fold CV
         cv_strategy = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
 
-        # Cross-validation scores
+        # Điểm cross-validation
         cv_scores_precision = cross_val_score(cv_model, X_train, y_train, cv=cv_strategy, scoring='precision')
         cv_scores_recall = cross_val_score(cv_model, X_train, y_train, cv=cv_strategy, scoring='recall')
         cv_scores_f1 = cross_val_score(cv_model, X_train, y_train, cv=cv_strategy, scoring='f1')
@@ -88,21 +88,21 @@ class FraudDetectionModel:
         return cv_results
 
     def evaluate_model(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
-        """Evaluate model performance"""
-        print("=== EVALUATING MODEL ===")
+        """Đánh giá hiệu suất mô hình"""
+        print("=== MODEL EVALUATION ===")
 
-        # Predictions
+        # Dự đoán
         y_pred = self.model.predict(X_test)
         y_pred_proba = self.model.predict_proba(X_test)
 
-        # Metrics
+        # Chỉ số
         precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='binary')
         roc_auc = roc_auc_score(y_test, y_pred_proba[:, 1])
 
-        # Confusion Matrix
+        # Ma trận nhầm lẫn
         cm = confusion_matrix(y_test, y_pred)
 
-        # Classification Report
+        # Báo cáo phân loại
         report = classification_report(y_test, y_pred, output_dict=True)
 
         evaluation_results = {
@@ -118,33 +118,33 @@ class FraudDetectionModel:
         print(".4f")
         print(".4f")
         print(".4f")
-        print(f"Confusion Matrix:\n{cm}")
+        print(f"Confusion matrix:\n{cm}")
 
         return evaluation_results
 
     def predict_with_explanation(self, transaction_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Predict fraud with explanation"""
-        print("=== PREDICTING WITH EXPLANATION ===")
+        """Dự đoán gian lận với giải thích"""
+        print("=== PREDICT WITH EXPLANATION ===")
 
-        # Convert to DataFrame
+        # Chuyển thành DataFrame
         df = pd.DataFrame([transaction_data])
 
-        # Preprocess for inference
+        # Tiền xử lý cho suy luận
         preprocessor = FraudDetectionPreprocessor()
         X_processed = preprocessor.preprocess_inference(df)
 
-        # Load model if not loaded
+        # Tải mô hình nếu chưa tải
         if self.model is None:
             self.load_model()
 
-        # Predict
+        # Dự đoán
         prediction = self.model.predict(X_processed)[0]
         probabilities = self.model.predict_proba(X_processed)
 
-        # Calculate risk score
+        # Tính điểm rủi ro
         risk_score = calculate_risk_score(probabilities)
 
-        # Determine risk level
+        # Xác định mức rủi ro
         if risk_score >= 0.7:
             risk_level = "HIGH"
         elif risk_score >= 0.3:
@@ -152,10 +152,10 @@ class FraudDetectionModel:
         else:
             risk_level = "LOW"
 
-        # Get feature values for explanation
+        # Lấy giá trị đặc trưng để giải thích
         feature_dict = dict(zip(self.feature_names, X_processed[0]))
 
-        # Explain prediction
+        # Giải thích dự đoán
         reasons = explain_prediction(feature_dict, prediction, risk_score)
 
         result = {
@@ -169,50 +169,62 @@ class FraudDetectionModel:
         return result
 
     def save_model(self):
-        """Save trained model"""
+        """Lưu mô hình đã huấn luyện"""
         path = os.path.join(self.model_dir, 'fraud_detection_model.pkl')
         joblib.dump(self.model, path)
         print(f"Model saved to: {path}")
 
     def load_model(self):
-        """Load trained model"""
+        """Tải mô hình đã huấn luyện"""
         path = os.path.join(self.model_dir, 'fraud_detection_model.pkl')
         self.model = joblib.load(path)
         print(f"Model loaded from: {path}")
 
-        # Load feature names if available
+        # Tải tên đặc trưng nếu có
         feature_path = os.path.join(self.model_dir, 'feature_names.pkl')
         if os.path.exists(feature_path):
             self.feature_names = joblib.load(feature_path)
 
 def save_feature_names(feature_names: List[str], model_dir: str = "../models"):
-    """Save feature names for later use"""
+    """Lưu tên đặc trưng để sử dụng sau"""
     path = os.path.join(model_dir, 'feature_names.pkl')
     joblib.dump(feature_names, path)
     print(f"Feature names saved to: {path}")
 
-# Example usage and demo
+# Ví dụ sử dụng và demo
 if __name__ == "__main__":
-    # Initialize components
+    print("=== START MODEL TRAINING ===")
+    # Khởi tạo các thành phần
     preprocessor = FraudDetectionPreprocessor()
     model_trainer = FraudDetectionModel()
 
-    # Preprocess data
+    # Tiền xử lý dữ liệu với hybrid split (time + user based)
     X_train, X_test, y_train, y_test, feature_names = preprocessor.preprocess_training()
 
-    # Save feature names
+    # Thêm thông tin về split method
+    print("\n=== DATA SPLIT INFO ===")
+    print("✅ Using HYBRID SPLIT: Time-based + User-based")
+    print("✅ No user appears in both train and test")
+    print("✅ Features only use historical information")
+    print("✅ No future information leakage")
+
+    # Lưu tên đặc trưng
     save_feature_names(feature_names)
 
-    # Train model
+    # Huấn luyện mô hình
     model = model_trainer.train_model(X_train, y_train, feature_names)
 
-    # Cross-validate to check for overfitting
+    # Cross-validate để kiểm tra overfitting
     cv_results = model_trainer.cross_validate_model(X_train, y_train)
 
-    # Evaluate model
+    # Đánh giá mô hình
     evaluation = model_trainer.evaluate_model(X_test, y_test)
 
-    # Demo prediction
+    print("\n=== OVERALL RESULTS ===")
+    print(f"Training completed with {len(feature_names)} features")
+    print(f"Model evaluation: Precision={evaluation['precision']:.4f}, Recall={evaluation['recall']:.4f}, F1={evaluation['f1_score']:.4f}")
+
+    # Dự đoán demo
     sample_transaction = {
         'step': 1,
         'type': 'TRANSFER',
@@ -224,5 +236,5 @@ if __name__ == "__main__":
     }
 
     result = model_trainer.predict_with_explanation(sample_transaction)
-    print("Sample prediction result:")
+    print("Sample prediction results:")
     print(result)

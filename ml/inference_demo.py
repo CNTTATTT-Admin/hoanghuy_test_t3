@@ -1,17 +1,17 @@
-# Fraud Detection Inference Demo
-# Author: Generated for FraudDetect Project
-# Description: Demo script for real-time fraud detection inference
+# Demo suy luận phát hiện gian lận
+# Tác giả: Tạo cho dự án FraudDetect
+# Mô tả: Script demo cho suy luận phát hiện gian lận thời gian thực
 
 import json
 from train import FraudDetectionModel
 
 def demo_inference():
-    """Demo inference with sample transactions"""
+    """Demo suy luận với các giao dịch mẫu"""
 
-    # Initialize model
+    # Khởi tạo mô hình
     model = FraudDetectionModel()
 
-    # Sample transactions (some legitimate, some fraudulent)
+    # Các giao dịch mẫu (một số hợp pháp, một số gian lận)
     sample_transactions = [
         {
             "step": 1,
@@ -42,14 +42,14 @@ def demo_inference():
         }
     ]
 
-    print("=== FRAUD DETECTION INFERENCE DEMO ===\n")
+    print("=== DEMO SUY LUẬN PHÁT HIỆN GIAN LẬN ===\n")
 
     for i, transaction in enumerate(sample_transactions, 1):
-        print(f"Transaction {i}:")
+        print(f"Giao dịch {i}:")
         print(json.dumps(transaction, indent=2))
 
         result = model.predict_with_explanation(transaction)
-        print("Prediction Result:")
+        print("Kết quả dự đoán:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
         print("-" * 50)
 
