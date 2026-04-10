@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -14,7 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY backend/app ./app
-COPY ml_pipeline/models ./models
+COPY ml ./ml
+COPY configs ./configs
+COPY models ./models
 
 # Expose port
 EXPOSE 8000

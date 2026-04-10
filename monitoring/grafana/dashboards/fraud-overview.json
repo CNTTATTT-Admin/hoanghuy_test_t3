@@ -1,0 +1,420 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "FraudDetect — tổng quan giao dịch, latency, model drift, infrastructure",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Transaction Rate (5m)",
+      "description": "Số giao dịch xử lý mỗi giây, theo loại tx_type và decision",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "reqps"
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "expr": "sum by (tx_type, decision) (rate(frauddetect_transactions_total[5m]))",
+          "legendFormat": "{{tx_type}} / {{decision}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Block Rate (5m)",
+      "description": "Tỷ lệ block theo block_reason",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "reqps"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (block_reason) (rate(frauddetect_blocked_transactions_total[5m]))",
+          "legendFormat": "{{block_reason}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Block Rate %",
+      "description": "Phần trăm giao dịch bị block trong 5 phút gần nhất",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 20 }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto" },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(frauddetect_blocked_transactions_total[5m])) / (sum(rate(frauddetect_transactions_total[5m])) > 0)",
+          "legendFormat": "Block Rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Authorize Latency — P50 / P95 / P99",
+      "description": "Latency phân vị của /authorize endpoint (end-to-end)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(frauddetect_authorize_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(frauddetect_authorize_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "P95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(frauddetect_authorize_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "P99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Fraud Probability Distribution",
+      "description": "Phân phối fraud probability scores — heatmap theo thời gian",
+      "type": "heatmap",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "options": {
+        "calculate": false,
+        "yAxis": { "unit": "short" },
+        "color": { "scheme": "Spectral", "mode": "scheme" }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(frauddetect_fraud_probability_bucket[5m])) by (le)",
+          "legendFormat": "{{le}}",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Model Drift Severity",
+      "description": "0 = OK (xanh), 1 = MODERATE (vàng), 2 = SEVERE (đỏ)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          },
+          "mappings": [
+            { "options": { "0": { "text": "OK" }, "1": { "text": "MODERATE" }, "2": { "text": "SEVERE" } }, "type": "value" }
+          ]
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center" },
+      "targets": [
+        {
+          "expr": "frauddetect_drift_severity",
+          "legendFormat": "Drift Severity",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "PSI Scores per Feature",
+      "description": "Population Stability Index mỗi feature (>0.1 = MODERATE, >0.2 = SEVERE)",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 0.2 }
+            ]
+          },
+          "min": 0,
+          "max": 0.5
+        }
+      },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "valueMode": "color" },
+      "targets": [
+        {
+          "expr": "frauddetect_model_psi_score",
+          "legendFormat": "{{feature_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Redis Cache Hit Rate",
+      "description": "Tỷ lệ cache hit trên tổng số decision requests",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "green", "value": 70 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "100 * rate(frauddetect_redis_cache_hits_total[5m]) / (rate(frauddetect_redis_cache_hits_total[5m]) + rate(frauddetect_redis_cache_misses_total[5m]) > 0)",
+          "legendFormat": "Hit Rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Kafka Consumer Lag",
+      "description": "Consumer lag theo topic và partition — lag cao → consumer chậm",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "frauddetect_kafka_consumer_lag",
+          "legendFormat": "{{topic}} / partition {{partition}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["frauddetect", "ml", "monitoring"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource",
+        "label": "Datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "FraudDetect — Fraud Detection Overview",
+  "uid": "frauddetect-overview-v1",
+  "version": 1,
+  "weekStart": "",
+  "alerting": {
+    "rules": [
+      {
+        "uid": "alert-block-rate-critical",
+        "title": "[CRITICAL] Block Rate > 20%",
+        "condition": "C",
+        "data": [
+          {
+            "refId": "A",
+            "queryType": "",
+            "relativeTimeRange": { "from": 300, "to": 0 },
+            "datasourceUid": "${datasource}",
+            "model": {
+              "expr": "100 * sum(rate(frauddetect_blocked_transactions_total[5m])) / sum(rate(frauddetect_transactions_total[5m]))",
+              "refId": "A"
+            }
+          },
+          {
+            "refId": "C",
+            "queryType": "",
+            "relativeTimeRange": { "from": 0, "to": 0 },
+            "datasourceUid": "__expr__",
+            "model": {
+              "conditions": [{ "evaluator": { "params": [20], "type": "gt" }, "operator": { "type": "and" }, "query": { "params": ["A"] }, "reducer": { "type": "last" }, "type": "query" }],
+              "refId": "C",
+              "type": "classic_conditions"
+            }
+          }
+        ],
+        "noDataState": "NoData",
+        "execErrState": "Error",
+        "for": "5m",
+        "annotations": { "summary": "Tỷ lệ block vượt 20% trong 5 phút — kiểm tra rule engine và model" },
+        "labels": { "severity": "critical" }
+      },
+      {
+        "uid": "alert-p99-latency-warning",
+        "title": "[WARNING] P99 Authorize Latency > 200ms",
+        "condition": "C",
+        "data": [
+          {
+            "refId": "A",
+            "relativeTimeRange": { "from": 300, "to": 0 },
+            "datasourceUid": "${datasource}",
+            "model": {
+              "expr": "histogram_quantile(0.99, sum(rate(frauddetect_authorize_latency_seconds_bucket[5m])) by (le)) * 1000",
+              "refId": "A"
+            }
+          },
+          {
+            "refId": "C",
+            "datasourceUid": "__expr__",
+            "model": {
+              "conditions": [{ "evaluator": { "params": [200], "type": "gt" }, "operator": { "type": "and" }, "query": { "params": ["A"] }, "reducer": { "type": "last" }, "type": "query" }],
+              "refId": "C",
+              "type": "classic_conditions"
+            }
+          }
+        ],
+        "noDataState": "NoData",
+        "execErrState": "Error",
+        "for": "5m",
+        "annotations": { "summary": "P99 /authorize latency vượt 200ms — kiểm tra tải hệ thống và model" },
+        "labels": { "severity": "warning" }
+      },
+      {
+        "uid": "alert-drift-severe-warning",
+        "title": "[WARNING] Model Drift Severity = SEVERE",
+        "condition": "C",
+        "data": [
+          {
+            "refId": "A",
+            "relativeTimeRange": { "from": 300, "to": 0 },
+            "datasourceUid": "${datasource}",
+            "model": { "expr": "frauddetect_drift_severity", "refId": "A" }
+          },
+          {
+            "refId": "C",
+            "datasourceUid": "__expr__",
+            "model": {
+              "conditions": [{ "evaluator": { "params": [2], "type": "gte" }, "operator": { "type": "and" }, "query": { "params": ["A"] }, "reducer": { "type": "last" }, "type": "query" }],
+              "refId": "C",
+              "type": "classic_conditions"
+            }
+          }
+        ],
+        "noDataState": "NoData",
+        "execErrState": "Error",
+        "for": "0s",
+        "annotations": { "summary": "Data drift nghiêm trọng — cân nhắc retrain model" },
+        "labels": { "severity": "warning" }
+      },
+      {
+        "uid": "alert-psi-info",
+        "title": "[INFO] PSI Score > 0.1 (bất kỳ feature)",
+        "condition": "C",
+        "data": [
+          {
+            "refId": "A",
+            "relativeTimeRange": { "from": 300, "to": 0 },
+            "datasourceUid": "${datasource}",
+            "model": { "expr": "max(frauddetect_model_psi_score)", "refId": "A" }
+          },
+          {
+            "refId": "C",
+            "datasourceUid": "__expr__",
+            "model": {
+              "conditions": [{ "evaluator": { "params": [0.1], "type": "gt" }, "operator": { "type": "and" }, "query": { "params": ["A"] }, "reducer": { "type": "last" }, "type": "query" }],
+              "refId": "C",
+              "type": "classic_conditions"
+            }
+          }
+        ],
+        "noDataState": "NoData",
+        "execErrState": "Error",
+        "for": "15m",
+        "annotations": { "summary": "PSI của ít nhất một feature vượt 0.1 — theo dõi phân phối dữ liệu" },
+        "labels": { "severity": "info" }
+      }
+    ]
+  }
+}

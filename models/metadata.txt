@@ -1,0 +1,7 @@
+version=latest
+saved_at=2026-04-10T14:50:10.213501
+threshold=0.050000
+calibration_method=isotonic
+n_features=12
+amount_threshold=305766.41
+amount_clip_value=2104259.94

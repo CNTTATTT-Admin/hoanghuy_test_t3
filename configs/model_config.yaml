@@ -1,1 +1,8 @@
-"""ML Model Configuration"""
+calibration_method: isotonic
+calibration_validation_size: 0.2
+random_state: 42
+prediction_threshold: 0.35
+threshold_selection: precision_at_recall
+target_recall: 0.70
+train_negative_multiplier: 8
+temporal_backtest_folds: 3

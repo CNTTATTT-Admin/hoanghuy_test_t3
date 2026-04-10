@@ -48,6 +48,9 @@ data/processed/
 # Env
 .env
 .env.local
+
+# Documentation
+*.md
 .env.*.local
 
 # Logs
@@ -66,3 +69,11 @@ docker-compose.override.yml
 # Kubernetes
 *.yaml~
 *.yml~
+
+# diagrams
+*.drawio
+
+#prompts
+prompts/
+
+node_modules/

@@ -1,0 +1,31 @@
+# File: prometheus/prometheus.yml
+
+# Global config
+global:
+  scrape_interval: 15s        # Mỗi 15 giây lấy metrics
+  evaluation_interval: 15s
+
+# Các target để Prometheus scrape
+scrape_configs:
+  # Metrics từ backend FastAPI
+  - job_name: 'backend'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['backend:8000']   # backend container name + port
+
+  # Redis exporter (nếu bạn dùng Redis exporter)
+  - job_name: 'redis'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['redis:6379']
+
+  # PostgreSQL exporter (nếu bạn cài postgres_exporter)
+  - job_name: 'postgres'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['postgres:9187']   # mặc định postgres_exporter port
+
+  # Node exporter (nếu bạn có host metrics)
+  # - job_name: 'node'
+  #   static_configs:
+  #     - targets: ['host.docker.internal:9100']
