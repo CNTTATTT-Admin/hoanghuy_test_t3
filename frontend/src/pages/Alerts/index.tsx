@@ -7,10 +7,12 @@ import { useAlerts } from './hooks/useAlerts'
 import { AlertFilters } from './components/AlertFilters'
 import { AlertTable } from './components/AlertTable'
 import { AlertDetailModal } from './components/AlertDetailModal'
+import { AssignDialog } from './components/AssignDialog'
+import { CommentDialog } from './components/CommentDialog'
 import { apiPost } from '../../services/apiClient'
 import { tokens } from '../../theme'
 import { normalizeTxType } from '../../utils/transactionType'
-import type { AlertRecord } from './types'
+import type { AlertRecord, SortField, SortDirection } from './types'
 
 export function Alerts() {
   // Lấy dữ liệu cảnh báo từ backend — tự động polling mỗi 30 giây
@@ -21,13 +23,21 @@ export function Alerts() {
   const [filterRisk, setFilterRisk]       = useState('all')
   const [filterStatus, setFilterStatus]   = useState('all')
   const [filterTxType, setFilterTxType]   = useState('all')
+  const [amountMin, setAmountMin]         = useState(0)
+  const [amountMax, setAmountMax]         = useState(Infinity)
+  const [sortField, setSortField]         = useState<SortField>('priority')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [detailAlert, setDetailAlert]     = useState<AlertRecord | null>(null)
+  const [assignDialogId, setAssignDialogId]   = useState<string | null>(null)
+  const [commentDialogId, setCommentDialogId] = useState<string | null>(null)
 
-  const filtered = useMemo(() =>
-    alerts.filter((a) => {
+  const filtered = useMemo(() => {
+    let result = alerts.filter((a) => {
       if (filterRisk   !== 'all' && a.riskLevel !== filterRisk)   return false
       if (filterStatus !== 'all' && a.status    !== filterStatus) return false
       if (filterTxType !== 'all' && normalizeTxType(a.txType) !== filterTxType) return false
+      if (a.amount < amountMin) return false
+      if (amountMax !== Infinity && a.amount > amountMax) return false
       if (search) {
         const q = search.toLowerCase()
         const matchId   = a.id.toLowerCase().includes(q)
@@ -37,12 +47,28 @@ export function Alerts() {
         if (!matchId && !matchTxId && !matchOrig && !matchDest) return false
       }
       return true
-    }),
-    [alerts, search, filterRisk, filterStatus, filterTxType],
-  )
+    })
+
+    result = [...result].sort((a, b) => {
+      let comparison = 0
+      switch (sortField) {
+        case 'priority': comparison = a.priorityScore - b.priorityScore; break
+        case 'time':     comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(); break
+        case 'risk':     comparison = a.riskScore - b.riskScore; break
+        case 'amount':   comparison = a.amount - b.amount; break
+        case 'sla':      comparison = (a.waitTimeMinutes ?? 0) - (b.waitTimeMinutes ?? 0); break
+      }
+      return sortDirection === 'desc' ? -comparison : comparison
+    })
+
+    return result
+  }, [alerts, search, filterRisk, filterStatus, filterTxType, amountMin, amountMax, sortField, sortDirection])
 
   const handleReset = () => {
-    setSearch(''); setFilterRisk('all'); setFilterStatus('all'); setFilterTxType('all'); setPage(0)
+    setSearch(''); setFilterRisk('all'); setFilterStatus('all'); setFilterTxType('all')
+    setAmountMin(0); setAmountMax(Infinity)
+    setSortField('priority'); setSortDirection('desc')
+    setPage(0)
   }
 
   // Chỉ tính điểm rủi ro trung bình từ alerts đang mở / đang xử lý
@@ -66,8 +92,23 @@ export function Alerts() {
     refetch()
   }
   const handleEscalate = (id: string) => {
-    // Placeholder — mở ticket / gửi thông báo escalate
     console.info('[Escalate] alert ID:', id)
+  }
+  const handleMarkFraud = async (id: string) => {
+    await apiPost(`/api/v1/alerts/${id}/acknowledge`, { action: 'mark_fraud' })
+    refetch()
+  }
+  const handleMarkLegit = async (id: string) => {
+    await apiPost(`/api/v1/alerts/${id}/acknowledge`, { action: 'mark_legit' })
+    refetch()
+  }
+  const handleAssign    = (id: string) => setAssignDialogId(id)
+  const handleAddComment = (id: string) => setCommentDialogId(id)
+
+  const handleSortChange = (field: SortField) => {
+    if (sortField === field) setSortDirection(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortField(field); setSortDirection('desc') }
+    setPage(0)
   }
 
   return (
@@ -144,10 +185,17 @@ export function Alerts() {
         filterRisk={filterRisk}
         filterStatus={filterStatus}
         filterTxType={filterTxType}
+        amountMin={amountMin}
+        amountMax={amountMax}
+        sortField={sortField}
+        sortDirection={sortDirection}
         onSearchChange={(v) => { setSearch(v); setPage(0) }}
         onRiskChange={(v) => { setFilterRisk(v); setPage(0) }}
         onStatusChange={(v) => { setFilterStatus(v); setPage(0) }}
         onTxTypeChange={(v) => { setFilterTxType(v); setPage(0) }}
+        onAmountMinChange={(v) => { setAmountMin(v); setPage(0) }}
+        onAmountMaxChange={(v) => { setAmountMax(v); setPage(0) }}
+        onSortChange={(field, dir) => { setSortField(field); setSortDirection(dir); setPage(0) }}
         onReset={handleReset}
       />
 
@@ -167,6 +215,13 @@ export function Alerts() {
             onIgnore={handleIgnore}
             onResolve={handleResolve}
             onEscalate={handleEscalate}
+            onMarkFraud={handleMarkFraud}
+            onMarkLegit={handleMarkLegit}
+            onAssign={handleAssign}
+            onAddComment={handleAddComment}
+            sortField={sortField}
+            sortDirection={sortDirection}
+            onSort={handleSortChange}
           />
         )}
       </Box>
@@ -178,6 +233,21 @@ export function Alerts() {
         onClose={() => setDetailAlert(null)}
         onIgnore={handleIgnore}
         onResolve={handleResolve}
+      />
+
+      {/* ── Dialog phân công analyst ── */}
+      <AssignDialog
+        open={assignDialogId !== null}
+        alertId={assignDialogId}
+        onClose={() => setAssignDialogId(null)}
+        onAssigned={() => { setAssignDialogId(null); refetch() }}
+      />
+
+      {/* ── Dialog ghi chú điều tra ── */}
+      <CommentDialog
+        open={commentDialogId !== null}
+        alertId={commentDialogId}
+        onClose={() => setCommentDialogId(null)}
       />
     </Box>
   )

@@ -1,0 +1,57 @@
+import { dt as clsx } from "./styled-Cfnrj_1B.js";
+//#region node_modules/@mui/material/esm/utils/mergeSlotProps.js
+function isEventHandler(key, value) {
+	const thirdCharCode = key.charCodeAt(2);
+	return key[0] === "o" && key[1] === "n" && thirdCharCode >= 65 && thirdCharCode <= 90 && typeof value === "function";
+}
+function mergeSlotProps(externalSlotProps, defaultSlotProps) {
+	if (!externalSlotProps) return defaultSlotProps;
+	function extractHandlers(externalSlotPropsValue, defaultSlotPropsValue) {
+		const handlers = {};
+		Object.keys(defaultSlotPropsValue).forEach((key) => {
+			if (isEventHandler(key, defaultSlotPropsValue[key]) && typeof externalSlotPropsValue[key] === "function") handlers[key] = (...args) => {
+				externalSlotPropsValue[key](...args);
+				defaultSlotPropsValue[key](...args);
+			};
+		});
+		return handlers;
+	}
+	if (typeof externalSlotProps === "function" || typeof defaultSlotProps === "function") return (ownerState) => {
+		const defaultSlotPropsValue = typeof defaultSlotProps === "function" ? defaultSlotProps(ownerState) : defaultSlotProps;
+		const externalSlotPropsValue = typeof externalSlotProps === "function" ? externalSlotProps({
+			...ownerState,
+			...defaultSlotPropsValue
+		}) : externalSlotProps;
+		const className = clsx(ownerState?.className, defaultSlotPropsValue?.className, externalSlotPropsValue?.className);
+		const handlers = extractHandlers(externalSlotPropsValue, defaultSlotPropsValue);
+		return {
+			...defaultSlotPropsValue,
+			...externalSlotPropsValue,
+			...handlers,
+			...!!className && { className },
+			...defaultSlotPropsValue?.style && externalSlotPropsValue?.style && { style: {
+				...defaultSlotPropsValue.style,
+				...externalSlotPropsValue.style
+			} },
+			...defaultSlotPropsValue?.sx && externalSlotPropsValue?.sx && { sx: [...Array.isArray(defaultSlotPropsValue.sx) ? defaultSlotPropsValue.sx : [defaultSlotPropsValue.sx], ...Array.isArray(externalSlotPropsValue.sx) ? externalSlotPropsValue.sx : [externalSlotPropsValue.sx]] }
+		};
+	};
+	const typedDefaultSlotProps = defaultSlotProps;
+	const handlers = extractHandlers(externalSlotProps, typedDefaultSlotProps);
+	const className = clsx(typedDefaultSlotProps?.className, externalSlotProps?.className);
+	return {
+		...defaultSlotProps,
+		...externalSlotProps,
+		...handlers,
+		...!!className && { className },
+		...typedDefaultSlotProps?.style && externalSlotProps?.style && { style: {
+			...typedDefaultSlotProps.style,
+			...externalSlotProps.style
+		} },
+		...typedDefaultSlotProps?.sx && externalSlotProps?.sx && { sx: [...Array.isArray(typedDefaultSlotProps.sx) ? typedDefaultSlotProps.sx : [typedDefaultSlotProps.sx], ...Array.isArray(externalSlotProps.sx) ? externalSlotProps.sx : [externalSlotProps.sx]] }
+	};
+}
+//#endregion
+export { mergeSlotProps as t };
+
+//# sourceMappingURL=mergeSlotProps-CDPvwt2P.js.map

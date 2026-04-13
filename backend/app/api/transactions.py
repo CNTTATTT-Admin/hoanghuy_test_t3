@@ -6,7 +6,7 @@ import json
 import os
 import time
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from typing import Any, Dict, Optional
 import logging
@@ -32,6 +32,7 @@ from services.fraud_detection import get_fraud_detection_service
 from services.realtime_check_service import get_realtime_check_service
 from core.redis_client import get_redis
 from core.fraud_decision import make_fraud_decision, FraudDecision
+from core.security import get_current_user, require_role
 from core.metrics import (
     authorize_latency_seconds,
     blocked_transactions_total,
@@ -62,6 +63,7 @@ realtime_service = get_realtime_check_service()
 async def check_transaction(
     transaction: TransactionCheckRequest,
     background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role(["USER", "ANALYST", "ADMIN", "ML_ENGINEER"])),
 ) -> TransactionCheckResponse:
     """Production realtime fraud check endpoint integrated with ML realtime detector."""
     try:
@@ -393,6 +395,7 @@ async def _emit_block_alert(tx_payload: dict, fraud_prob: float, transaction_id:
 async def authorize_transaction(
     transaction: AuthorizeRequest,
     background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role(["ANALYST", "ADMIN"])),
 ) -> JSONResponse:
     """Endpoint chặn/cho phép giao dịch real-time TRƯỚC khi thực thi.
 
@@ -653,7 +656,8 @@ async def authorize_transaction(
 )
 async def detect_fraud(
     transaction: TransactionRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role(["USER", "ANALYST", "ADMIN", "ML_ENGINEER"])),
 ) -> TransactionResponse:
     """
     Phát hiện gian lận cho một giao dịch
@@ -700,7 +704,8 @@ async def detect_fraud(
 @router.post("/batch-detect-fraud")
 async def batch_detect_fraud(
     transactions: list[TransactionRequest],
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(require_role(["ANALYST", "ADMIN"])),
 ) -> Dict[str, Any]:
     """
     Phát hiện gian lận cho nhiều giao dịch cùng lúc

@@ -18,36 +18,44 @@ import type { ComponentType } from 'react'
 import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined'
 import ManageSearchIcon from '@mui/icons-material/ManageSearch'
 import NotificationsActiveOutlinedIcon from '@mui/icons-material/NotificationsActiveOutlined'
-import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined'
-import PeopleAltOutlinedIcon from '@mui/icons-material/PeopleAltOutlined'
 import InsightsIcon from '@mui/icons-material/Insights'
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined'
+import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined'
+import { useAuth } from '../hooks/useAuth'
+import type { UserRole } from '../services/authService'
 
 interface NavItem {
   label: string
   path: string
   Icon: ComponentType<SvgIconProps>
+  /** Role nào được thấy mục này; undefined = tất cả */
+  roles?: UserRole[]
 }
 
 const navItems: NavItem[] = [
-  { label: 'Tổng quan',      path: '/',          Icon: DashboardOutlinedIcon },
-  { label: 'Kiểm tra GD',   path: '/check',     Icon: ManageSearchIcon },
-  { label: 'Cảnh báo',      path: '/alerts',         Icon: NotificationsActiveOutlinedIcon },
-  { label: 'Thông báo',     path: '/notifications',  Icon: NotificationsOutlinedIcon },
-  { label: 'Phân tích',     path: '/analytics', Icon: InsightsIcon },
-  { label: 'Người dùng',    path: '/users',     Icon: PeopleAltOutlinedIcon },
-  { label: 'Cài đặt',       path: '/settings',  Icon: SettingsOutlinedIcon },
+  { label: 'Tổng quan',      path: '/',               Icon: DashboardOutlinedIcon },
+  { label: 'Kiểm tra GD',   path: '/check',           Icon: ManageSearchIcon, roles: ['USER', 'ANALYST', 'ADMIN', 'ML_ENGINEER'] },
+  { label: 'Cảnh báo',       path: '/alerts',          Icon: NotificationsActiveOutlinedIcon, roles: ['USER', 'ANALYST', 'ADMIN', 'COMPLIANCE'] },
+  { label: 'Phân tích',     path: '/analytics',        Icon: InsightsIcon, roles: ['ANALYST', 'ADMIN', 'ML_ENGINEER', 'COMPLIANCE'] },
+  { label: 'Quản lý TK',   path: '/admin/users',      Icon: AdminPanelSettingsOutlinedIcon, roles: ['ADMIN'] },
+  { label: 'Cài đặt',       path: '/settings',         Icon: SettingsOutlinedIcon, roles: ['ADMIN'] },
 ]
 
 export function Sidebar() {
   const theme = useTheme()
   const location = useLocation()
   const navigate = useNavigate()
+  const { user } = useAuth()
 
   const isActive = (path: string) =>
     path === '/'
       ? location.pathname === '/'
       : location.pathname.startsWith(path)
+
+  // Lọc nav items theo role của user
+  const visibleItems = navItems.filter(item =>
+    !item.roles || (user && item.roles.includes(user.role))
+  )
 
   return (
     <Drawer
@@ -84,7 +92,7 @@ export function Sidebar() {
 
       {/* Danh sách nav items */}
       <List sx={{ px: 1.5, flexGrow: 1 }}>
-        {navItems.map(({ label, path, Icon }) => {
+        {visibleItems.map(({ label, path, Icon }) => {
           const active = isActive(path)
           return (
             <ListItem key={path} disablePadding sx={{ mb: 0.5 }}>

@@ -1,13 +1,16 @@
 """Alert API Endpoints"""
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any, Optional
 import logging
 
 from pydantic import BaseModel
 
+import json
+
 from db.database import get_pool, is_db_enabled, record_to_dict, utcnow, acquire_connection, release_connection
+from core.security import get_current_user, require_role
 from notifier import get_notifier
 
 logger = logging.getLogger(__name__)
@@ -18,7 +21,7 @@ notifier = get_notifier()
 
 class AcknowledgeRequest(BaseModel):
     """Request body cho endpoint acknowledge_alert."""
-    action: str  # "ignore" → false_positive | "resolve" → resolved
+    action: str  # "ignore" | "resolve" | "mark_fraud" | "mark_legit"
 
 
 def _parse_iso_utc(value: Optional[str], field_name: str) -> Optional[datetime]:
@@ -42,6 +45,7 @@ async def get_alerts(
     status: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    _user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"])),
 ) -> Dict[str, Any]:
     """
     Lấy danh sách cảnh báo
@@ -104,7 +108,8 @@ async def get_alerts(
         for row in rows:
             alert = record_to_dict(row)
             alert["id"] = alert.get("alert_id")
-            details = alert.get("details") or {}
+            raw_details = alert.get("details")
+            details: dict = raw_details if isinstance(raw_details, dict) else {}
             # Flatten các field quan trọng từ JSONB details lên top-level cho frontend
             alert.setdefault("risk_score",     details.get("risk_score", 0))
             alert.setdefault("amount",         details.get("amount", 0))
@@ -126,7 +131,7 @@ async def get_alerts(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/alerts/stats")
-async def get_alert_stats() -> Dict[str, Any]:
+async def get_alert_stats(_user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))) -> Dict[str, Any]:
     """
     Lấy thống kê cảnh báo
     """
@@ -175,8 +180,36 @@ async def get_alert_stats() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/alerts/analysts")
+async def get_analysts(_user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))) -> Dict[str, Any]:
+    """Lấy danh sách analyst và admin để phân công xử lý cảnh báo."""
+    try:
+        if not is_db_enabled():
+            return {"analysts": []}
+
+        conn = await acquire_connection()
+        try:
+            rows = await conn.fetch(
+                "SELECT email, full_name FROM users WHERE role IN ('ANALYST', 'ADMIN') AND is_active = TRUE ORDER BY full_name"
+            )
+        finally:
+            await release_connection(conn)
+
+        analysts = [
+            {"email": r["email"], "full_name": r["full_name"] or r["email"]}
+            for r in rows
+        ]
+        return {"analysts": analysts}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching analysts: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/alerts/{alert_id}")
-async def get_alert(alert_id: str) -> Dict[str, Any]:
+async def get_alert(alert_id: str, _user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))) -> Dict[str, Any]:
     """
     Lấy chi tiết một cảnh báo
 
@@ -197,7 +230,8 @@ async def get_alert(alert_id: str) -> Dict[str, Any]:
 
         alert = record_to_dict(row)
         alert["id"] = alert.get("alert_id")
-        details = alert.get("details") or {}
+        raw_details = alert.get("details")
+        details: dict = raw_details if isinstance(raw_details, dict) else {}
         # Flatten các field quan trọng từ JSONB details lên top-level cho frontend
         alert.setdefault("risk_score",     details.get("risk_score", 0))
         alert.setdefault("amount",         details.get("amount", 0))
@@ -213,22 +247,24 @@ async def get_alert(alert_id: str) -> Dict[str, Any]:
 
 
 @router.post("/alerts/{alert_id}/acknowledge")
-async def acknowledge_alert(alert_id: str, body: AcknowledgeRequest) -> Dict[str, Any]:
+async def acknowledge_alert(alert_id: str, body: AcknowledgeRequest, user=Depends(require_role(["ANALYST", "ADMIN"]))) -> Dict[str, Any]:
     """
     Xác nhận đã xử lý cảnh báo
 
     - **alert_id**: ID của cảnh báo
-    - **body.action**: "ignore" → false_positive | "resolve" → resolved
+    - **body.action**: "ignore" | "resolve" | "mark_fraud" | "mark_legit"
     """
     action_to_status = {
-        "ignore":  "false_positive",
-        "resolve": "resolved",
+        "ignore":     "false_positive",
+        "resolve":    "resolved",
+        "mark_fraud": "confirmed_fraud",
+        "mark_legit": "false_positive",
     }
     new_status = action_to_status.get(body.action)
     if new_status is None:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid action '{body.action}'. Must be 'ignore' or 'resolve'.",
+            detail=f"Invalid action '{body.action}'. Must be one of: ignore, resolve, mark_fraud, mark_legit.",
         )
 
     try:
@@ -236,11 +272,20 @@ async def acknowledge_alert(alert_id: str, body: AcknowledgeRequest) -> Dict[str
             raise HTTPException(status_code=503, detail="Database is not enabled")
 
         now = utcnow()
+        actor = user.get("email") or user.get("full_name", "unknown") if isinstance(user, dict) else getattr(user, "email", "unknown")
+        metadata = {
+            "action": body.action,
+            "actioned_by": actor,
+            "actioned_at": now.isoformat(),
+        }
         conn = await acquire_connection()
         try:
             result = await conn.execute(
-                "UPDATE alerts SET status = $1, acknowledged_at = $2 WHERE alert_id = $3",
-                new_status, now, alert_id,
+                """UPDATE alerts
+                   SET status = $1, acknowledged_at = $2,
+                       details = COALESCE(details, '{}'::jsonb) || $3::jsonb
+                   WHERE alert_id = $4""",
+                new_status, now, json.dumps(metadata), alert_id,
             )
         finally:
             await release_connection(conn)
@@ -259,3 +304,119 @@ async def acknowledge_alert(alert_id: str, body: AcknowledgeRequest) -> Dict[str
     except Exception as e:
         logger.error(f"Error acknowledging alert {alert_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.put("/alerts/{alert_id}/assign")
+async def assign_alert(alert_id: str, body: Dict[str, Any], user=Depends(require_role(["ANALYST", "ADMIN"]))) -> Dict[str, Any]:
+    """Phân công analyst xử lý cảnh báo."""
+    assignee = (body.get("assignee") or "").strip()
+    if not assignee:
+        raise HTTPException(status_code=400, detail="Assignee is required")
+
+    try:
+        if not is_db_enabled():
+            raise HTTPException(status_code=503, detail="Database is not enabled")
+
+        now = utcnow()
+        actor = user.get("email") or user.get("full_name", "unknown") if isinstance(user, dict) else getattr(user, "email", "unknown")
+        conn = await acquire_connection()
+        try:
+            result = await conn.execute(
+                """UPDATE alerts
+                   SET details = jsonb_set(
+                       jsonb_set(COALESCE(details, '{}'::jsonb), '{assigned_to}', $1::jsonb),
+                       '{assigned_by}', $2::jsonb
+                   )
+                   WHERE alert_id = $3""",
+                json.dumps(assignee), json.dumps(actor), alert_id,
+            )
+        finally:
+            await release_connection(conn)
+
+        if result == "UPDATE 0":
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        return {"alert_id": alert_id, "assigned_to": assignee, "assigned_by": actor, "assigned_at": now.isoformat()}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error assigning alert {alert_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/alerts/{alert_id}/comments")
+async def get_alert_comments(alert_id: str, _user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))) -> Dict[str, Any]:
+    """Lấy danh sách comment của cảnh báo."""
+    try:
+        if not is_db_enabled():
+            raise HTTPException(status_code=503, detail="Database is not enabled")
+
+        conn = await acquire_connection()
+        try:
+            row = await conn.fetchrow(
+                "SELECT details FROM alerts WHERE alert_id = $1", alert_id
+            )
+        finally:
+            await release_connection(conn)
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        raw_details = row["details"]
+        details: dict = raw_details if isinstance(raw_details, dict) else {}
+        comments = details.get("comments", [])
+        return {"alert_id": alert_id, "comments": comments}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting comments for alert {alert_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/alerts/{alert_id}/comments")
+async def add_alert_comment(alert_id: str, body: Dict[str, Any], user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))) -> Dict[str, Any]:
+    """Thêm ghi chú điều tra vào cảnh báo."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Comment text is required")
+    if len(text) > 1000:
+        raise HTTPException(status_code=400, detail="Comment too long (max 1000 chars)")
+
+    try:
+        if not is_db_enabled():
+            raise HTTPException(status_code=503, detail="Database is not enabled")
+
+        now = utcnow()
+        actor = user.get("email") or user.get("full_name", "unknown") if isinstance(user, dict) else getattr(user, "email", "unknown")
+        comment = {"author": actor, "text": text, "created_at": now.isoformat()}
+
+        conn = await acquire_connection()
+        try:
+            result = await conn.execute(
+                """UPDATE alerts
+                   SET details = jsonb_set(
+                       COALESCE(details, '{}'::jsonb),
+                       '{comments}',
+                       COALESCE(details->'comments', '[]'::jsonb) || $1::jsonb
+                   )
+                   WHERE alert_id = $2""",
+                json.dumps([comment]), alert_id,
+            )
+        finally:
+            await release_connection(conn)
+
+        if result == "UPDATE 0":
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        return {"alert_id": alert_id, "comment": comment}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding comment to alert {alert_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# (get_analysts đã được chuyển lên trước /alerts/{alert_id} để tránh route shadowing)

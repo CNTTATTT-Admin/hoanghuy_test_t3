@@ -45,9 +45,11 @@ structlog==23.2.0
 
 # Security / Auth
 python-jose>=3.3.0
-passlib>=1.7.4
+passlib[bcrypt]>=1.7.4
 cryptography>=41.0.7
 PyJWT>=2.8.0
+bcrypt>=4.0.0
+email-validator>=2.0.0
 
 # Utilities
 python-dotenv==1.0.0

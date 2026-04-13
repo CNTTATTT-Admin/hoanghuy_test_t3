@@ -12,20 +12,67 @@ import uvicorn
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
+# load_dotenv PHẢI chạy trước mọi local import vì email_service đọc SMTP_HOST khi import
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from api.transactions import router as transactions_router
 from api.alerts import router as alerts_router
+from api.analytics import router as analytics_router
 from api.users import router as users_router
+from api.auth import router as auth_router
+from api.admin_users import router as admin_users_router
 from core.redis_client import close_redis, redis_health
 from db.database import close_db, init_db, is_db_enabled
 from logger import setup_logging
 from notifier import get_notifier
+from services.email_service import verify_smtp_connection
 
-# Setup logging
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 setup_logging()
 logger = logging.getLogger(__name__)
+
+
+async def _seed_default_admin():
+    """Tạo tài khoản admin mặc định nếu bảng users rỗng.
+
+    Chỉ chạy một lần khi khởi tạo hệ thống lần đầu.
+    Password mặc định CẦN THAY ĐỔI NGAY sau deploy.
+    """
+    try:
+        from db.user_repository import count_users, create_user, add_audit_log
+        from core.security import hash_password
+
+        total = await count_users()
+        if total > 0:
+            logger.info("Bảng users đã có %d tài khoản — bỏ qua seed admin.", total)
+            return
+
+        admin_email = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@frauddetect.com")
+        admin_password = os.getenv("DEFAULT_ADMIN_PASSWORD", "Admin@123456")
+
+        admin = await create_user(
+            email=admin_email,
+            password_hash=hash_password(admin_password),
+            full_name="System Administrator",
+            role="ADMIN",
+            is_active=True,
+            is_email_verified=True,
+        )
+
+        if admin:
+            await add_audit_log(
+                target_user_uid=admin["user_uid"],
+                action="ACCOUNT_CREATED",
+                new_value="ADMIN",
+                changed_by_uid=None,
+            )
+            logger.info("✅ Tài khoản admin mặc định đã được tạo: %s", admin_email)
+        else:
+            logger.warning("Không thể tạo tài khoản admin mặc định.")
+    except Exception as exc:
+        logger.warning("Lỗi khi seed admin (non-critical): %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,8 +84,13 @@ async def lifespan(app: FastAPI):
     db_ready = await init_db()
     if db_ready:
         logger.info("PostgreSQL integration enabled.")
+        # Seed tài khoản admin mặc định nếu bảng users rỗng
+        await _seed_default_admin()
     else:
         logger.warning("PostgreSQL integration disabled. Running without persistence.")
+
+    # Kiểm tra kết nối SMTP khi khởi động (non-critical — không dừng server nếu lỗi)
+    await verify_smtp_connection()
 
     # Khởi động Kafka producer/consumer nếu ENABLE_KAFKA=true
     _kafka_producer = None
@@ -172,10 +224,28 @@ app.include_router(
 ) # Router xử lý các endpoint liên quan đến cảnh báo gian lận
 
 app.include_router(
+    analytics_router,
+    prefix="/api/v1",
+    tags=["analytics"]
+) # Router tổng hợp dữ liệu analytics cho trang phân tích
+
+app.include_router(
     users_router,
     prefix="/api/v1",
     tags=["users"]
 ) # Router xử lý các endpoint liên quan đến người dùng (đăng nhập, quản lý tài khoản)
+
+app.include_router(
+    auth_router,
+    prefix="/api/v1/auth",
+    tags=["auth"]
+) # Router xác thực: đăng ký, đăng nhập, đăng xuất, xác thực email
+
+app.include_router(
+    admin_users_router,
+    prefix="/api/v1",
+    tags=["admin"]
+) # Router quản lý tài khoản hệ thống — chỉ ADMIN
 
 @app.get("/")
 async def root():

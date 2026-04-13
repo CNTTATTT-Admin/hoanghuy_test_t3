@@ -1,0 +1,1 @@
+{"version":3,"file":"ownerDocument-B4HNuzMK.js","names":[],"sources":["../../node_modules/@mui/material/esm/utils/ownerDocument.js"],"sourcesContent":["import ownerDocument from '@mui/utils/ownerDocument';\nexport default ownerDocument;"],"x_google_ignoreList":[0],"mappings":";;AACA,IAAA,wBAAe"}
