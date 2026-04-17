@@ -105,6 +105,25 @@ export function Alerts() {
   const handleAssign    = (id: string) => setAssignDialogId(id)
   const handleAddComment = (id: string) => setCommentDialogId(id)
 
+  // Mở khóa tài khoản bị đóng băng — gọi API unfreeze rồi resolve alert
+  const handleUnfreeze = async (alert: AlertRecord) => {
+    const userId = alert.nameOrig
+    if (!userId || userId === '—') {
+      alert && console.warn('Không tìm thấy user_id để mở khóa')
+      return
+    }
+    try {
+      await apiPost(`/api/v1/accounts/unfreeze/${encodeURIComponent(userId)}`, {
+        reason: `Mở khóa từ trang Cảnh báo — Alert ID: ${alert.id}`,
+      })
+      // Resolve alert sau khi unfreeze thành công
+      await apiPost(`/api/v1/alerts/${alert.id}/acknowledge`, { action: 'resolve' })
+      refetch()
+    } catch (err) {
+      console.error('Unfreeze failed:', err)
+    }
+  }
+
   const handleSortChange = (field: SortField) => {
     if (sortField === field) setSortDirection(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortField(field); setSortDirection('desc') }
@@ -219,6 +238,7 @@ export function Alerts() {
             onMarkLegit={handleMarkLegit}
             onAssign={handleAssign}
             onAddComment={handleAddComment}
+            onUnfreeze={handleUnfreeze}
             sortField={sortField}
             sortDirection={sortDirection}
             onSort={handleSortChange}

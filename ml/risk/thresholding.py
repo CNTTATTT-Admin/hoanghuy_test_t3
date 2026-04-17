@@ -13,11 +13,12 @@ from sklearn.metrics import f1_score, precision_recall_curve, recall_score
 
 ThresholdStrategy = Literal["f1", "recall", "precision_at_recall", "fixed"]
 
-MIN_SAFE_THRESHOLD = 0.05
+MIN_SAFE_THRESHOLD = 0.005
 MAX_SAFE_THRESHOLD = 0.95
-_CANDIDATES: np.ndarray = np.unique(
-    np.linspace(MIN_SAFE_THRESHOLD, MAX_SAFE_THRESHOLD, 181)
-)
+_CANDIDATES: np.ndarray = np.unique(np.concatenate([
+    np.linspace(0.005, 0.10, 100),   # Dense search in the low range
+    np.linspace(0.10, 0.95, 85),     # Sparser search in the high range
+]))
 
 
 class ThresholdOptimizer:

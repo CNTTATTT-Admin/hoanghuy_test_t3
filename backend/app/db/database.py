@@ -228,6 +228,15 @@ async def _ensure_tables() -> None:
             "ON drift_reports (severity, timestamp DESC);"
         )
 
+        # ── Tạo ENUM type cho account status (nếu chưa tồn tại) ─────────────
+        await conn.execute("""
+            DO $$ BEGIN
+                CREATE TYPE account_status_type AS ENUM ('active', 'frozen', 'suspended');
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+        """)
+
         # ── Bảng users — lưu tài khoản hệ thống (auth) ──────────────────────
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -241,10 +250,16 @@ async def _ensure_tables() -> None:
                 is_email_verified       BOOLEAN NOT NULL DEFAULT FALSE,
                 email_verify_token      VARCHAR(255),
                 email_verify_expires_at TIMESTAMPTZ,
+                account_status          account_status_type NOT NULL DEFAULT 'active',
                 created_at              TIMESTAMPTZ DEFAULT NOW(),
                 updated_at              TIMESTAMPTZ DEFAULT NOW(),
                 last_login_at           TIMESTAMPTZ
             );
+        """)
+        # Migration: thêm cột account_status cho DB hiện có
+        await conn.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS
+                account_status account_status_type NOT NULL DEFAULT 'active';
         """)
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);"
@@ -293,6 +308,90 @@ async def _ensure_tables() -> None:
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_created "
             "ON user_audit_log (created_at DESC);"
+        )
+
+        # ── Bảng system_settings — lưu cấu hình hệ thống theo namespace ────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                id         BIGSERIAL PRIMARY KEY,
+                namespace  VARCHAR(64)  NOT NULL,
+                key        VARCHAR(128) NOT NULL,
+                value      JSONB NOT NULL DEFAULT '{}',
+                updated_by VARCHAR(64),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(namespace, key)
+            );
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_settings_namespace "
+            "ON system_settings (namespace);"
+        )
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_ns_key "
+            "ON system_settings (namespace, key);"
+        )
+
+        # ── Bảng fraud_rules — Business Rule Engine ──────────────────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS fraud_rules (
+                id          BIGSERIAL PRIMARY KEY,
+                rule_id     VARCHAR(64) UNIQUE NOT NULL,
+                name        VARCHAR(255) NOT NULL,
+                description TEXT,
+                conditions  JSONB NOT NULL,
+                action      VARCHAR(20) NOT NULL,
+                priority    INTEGER DEFAULT 100,
+                is_enabled  BOOLEAN DEFAULT TRUE,
+                created_by  VARCHAR(64),
+                created_at  TIMESTAMPTZ DEFAULT NOW(),
+                updated_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fraud_rules_enabled_priority "
+            "ON fraud_rules (is_enabled, priority ASC);"
+        )
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_fraud_rules_rule_id "
+            "ON fraud_rules (rule_id);"
+        )
+
+        # ── Bảng account_status_log — lịch sử thay đổi trạng thái tài khoản ─
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS account_status_log (
+                id                 BIGSERIAL PRIMARY KEY,
+                user_uid           VARCHAR(64)  NOT NULL,
+                previous_status    VARCHAR(20)  NOT NULL,
+                new_status         VARCHAR(20)  NOT NULL,
+                reason             TEXT         NOT NULL,
+                triggered_by       VARCHAR(50)  NOT NULL,
+                fraud_probability  DOUBLE PRECISION,
+                transaction_hash   VARCHAR(64),
+                created_at         TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_account_status_log_user "
+            "ON account_status_log (user_uid, created_at DESC);"
+        )
+
+        # ── Bảng frozen_accounts — đóng băng tài khoản giao dịch (external) ──
+        # Dùng cho user_id không nằm trong bảng users (VD: C100000003)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS frozen_accounts (
+                id                 BIGSERIAL PRIMARY KEY,
+                user_id            VARCHAR(255) UNIQUE NOT NULL,
+                reason             TEXT,
+                fraud_probability  DOUBLE PRECISION,
+                transaction_hash   VARCHAR(64),
+                triggered_by       VARCHAR(50) NOT NULL DEFAULT 'SYSTEM_AUTO',
+                frozen_at          TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_frozen_accounts_user_id "
+            "ON frozen_accounts (user_id);"
         )
 
     logger.info("PostgreSQL tables and indexes ensured.")

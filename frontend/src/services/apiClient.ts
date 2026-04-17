@@ -69,3 +69,11 @@ export const apiPost = <T>(path: string, body: unknown) =>
 /** PUT request với body JSON */
 export const apiPut = <T>(path: string, body: unknown) =>
   apiFetch<T>(path, { method: 'PUT', body: JSON.stringify(body) })
+
+/** DELETE request */
+export const apiDelete = <T = void>(path: string) =>
+  apiFetch<T>(path, { method: 'DELETE' })
+
+/** PATCH request với body JSON tuỳ chọn */
+export const apiPatch = <T>(path: string, body?: unknown) =>
+  apiFetch<T>(path, { method: 'PATCH', body: body !== undefined ? JSON.stringify(body) : undefined })

@@ -7,30 +7,31 @@ preventing misleading justifications from heuristics outside the model's scope.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
-# Maps an engineered feature name to a plain-English reason string.
-# Only features present in REALTIME_SAFE_FEATURE_COLUMNS are listed here.
+# Lightweight labels for FraudExplainer (rule-based fallback for PostProcessor.reasons).
+# SHAP handles deep attribution — keep this list minimal and aligned with active features.
 _REASON_LABELS: Dict[str, str] = {
-    "amount_threshold_ratio": "Transaction amount is high relative to the training distribution",
-    "type_TRANSFER": "Transfer transactions carry above-average fraud risk",
-    "type_CASH_OUT": "Cash-out transactions carry above-average fraud risk",
-    "dest_is_empty": "Destination account has a zero starting balance",
+    "amount_threshold_ratio": "Số tiền giao dịch cao bất thường so với phân phối trong dữ liệu huấn luyện",
+    "type_TRANSFER": "Giao dịch chuyển khoản (TRANSFER) có mức rủi ro gian lận cao hơn trung bình",
+    "type_CASH_OUT": "Giao dịch rút tiền (CASH_OUT) có mức rủi ro gian lận cao hơn trung bình",
+    "dest_is_merchant": "Tài khoản đích là merchant (không phải khách hàng cá nhân)",
 }
 
 
 class FraudExplainer:
-    """Generate reasons from engineered features actually used by the model.
+    """Lightweight rule-based fallback that generates plain-English reasons.
+
+    Used by ``PostProcessor`` to populate the ``reasons`` field in API output.
+    For deep feature attribution use ``SHAPExplainer``.
 
     Args:
-        feature_names: The ordered list of feature column names that were
-            passed to the fitted ``ColumnTransformer``.  Used to validate that
-            explanations reference real features.
+        feature_names: Ordered feature column names from the artifact bundle.
     """
 
     def __init__(self, feature_names: Sequence[str] | None = None) -> None:
@@ -65,8 +66,8 @@ class FraudExplainer:
         if float(feature_frame.get("amount_threshold_ratio", 0.0)) >= 1.0:
             reasons.append(_REASON_LABELS["amount_threshold_ratio"])
 
-        if float(feature_frame.get("dest_is_empty", 0)) == 1:
-            reasons.append(_REASON_LABELS["dest_is_empty"])
+        if float(feature_frame.get("dest_is_merchant", 0)) == 1:
+            reasons.append(_REASON_LABELS["dest_is_merchant"])
 
         tx_type = str(feature_frame.get("type", "")).upper()
         type_key = f"type_{tx_type}"
@@ -104,25 +105,21 @@ class SHAPExplainer:
     def __init__(self, model: object, feature_names: list[str]) -> None:
         import shap  # type: ignore
 
-        # Kiểm tra model có phải tree-based không
         try:
             import lightgbm as lgb  # type: ignore
-            _lgb_types: tuple = (lgb.LGBMClassifier, lgb.Booster)
+            _is_tree = isinstance(model, (lgb.LGBMClassifier, lgb.Booster))
         except ImportError:
-            _lgb_types = ()
+            _is_tree = False
 
-        _is_tree = (
-            (_lgb_types and isinstance(model, _lgb_types))
-            # XGBoost / scikit-learn tree estimators cũng OK
-            or hasattr(model, "get_booster")
-            or type(model).__name__ in (
+        if not _is_tree:
+            _is_tree = hasattr(model, "get_booster") or type(model).__name__ in (
                 "DecisionTreeClassifier", "RandomForestClassifier",
                 "GradientBoostingClassifier", "XGBClassifier",
             )
-        )
+
         if not _is_tree:
             raise NotImplementedError(
-                "SHAPExplainer chỉ hỗ trợ tree-based models trong MVP. "
+                "SHAPExplainer chỉ hỗ trợ tree-based models. "
                 f"Nhận model type: {type(model).__name__}"
             )
 
@@ -163,46 +160,22 @@ class SHAPExplainer:
         """
         sv_raw = self._explainer.shap_values(feature_array)
 
-        # Xử lý cả hai trường hợp SHAP API:
-        # - Cũ: list [neg_class_array, pos_class_array]
-        # - Mới: array shape (1, n_features) cho positive class
+        # SHAP API: list [neg, pos] (shap<0.40) or array for pos class (shap>=0.40)
         if isinstance(sv_raw, list):
-            # Lấy class 1 (fraud class)
             sv: np.ndarray = np.asarray(sv_raw[1])[0]
-            base_value = float(
-                self._explainer.expected_value[1]
-                if hasattr(self._explainer.expected_value, "__len__")
-                else self._explainer.expected_value
-            )
         else:
             sv = np.asarray(sv_raw)[0]
-            ev = self._explainer.expected_value
-            base_value = float(
-                ev[1] if hasattr(ev, "__len__") else ev
-            )
+        ev = self._explainer.expected_value
+        base_value = float(ev[1] if hasattr(ev, "__len__") else ev)
 
-        # Validate: sum(shap) + base ≈ fraud_probability (sai số < 0.01)
-        shap_sum = float(np.sum(sv))
-        predicted_by_shap = shap_sum + base_value
-        if abs(predicted_by_shap - fraud_probability) > 0.01:
-            logger.warning(
-                "SHAP validation: sum(shap)+base=%.4f, probability=%.4f, diff=%.4f",
-                predicted_by_shap, fraud_probability,
-                abs(predicted_by_shap - fraud_probability),
-            )
-
-        # Số features an toàn — đề phòng feature_names ngắn hơn sv
+        # Clip to actual feature count (guards against artifact version mismatch)
         n = min(len(sv), len(self.feature_names))
-        sv_trimmed = sv[:n]
-        feature_names_trimmed = self.feature_names[:n]
-
-        # Sắp xếp theo |shap_value| giảm dần
-        indices = sorted(range(n), key=lambda i: abs(sv_trimmed[i]), reverse=True)
+        indices = sorted(range(n), key=lambda i: abs(sv[i]), reverse=True)
 
         top_features: list[dict] = []
         for i in indices[:top_k]:
-            fname = feature_names_trimmed[i]
-            sval = float(sv_trimmed[i])
+            fname = self.feature_names[i]
+            sval = float(sv[i])
             fval = float(feature_array[0, i]) if feature_array.ndim == 2 else float(feature_array[i])
             top_features.append({
                 "feature": fname,
@@ -223,11 +196,11 @@ class SHAPExplainer:
     # ── Nội bộ ───────────────────────────────────────────────────────────────
 
     def _to_vietnamese(self, feature_name: str, shap_value: float, feature_value: float) -> str:
-        """Chuyển feature + giá trị SHAP thành câu giải thích tiếng Việt.
+        """Chuyển feature + SHAP value thành câu giải thích tiếng Việt.
 
-        direction > 0 → làm tăng rủi ro; direction < 0 → làm giảm rủi ro.
+        shap_value > 0 → làm tăng rủi ro; shap_value < 0 → làm giảm rủi ro.
         """
-        d = shap_value  # ký hiệu ngắn gọn cho direction
+        d = shap_value
 
         mappings: dict[str, Any] = {
             "amount": lambda v, d: (
@@ -239,18 +212,34 @@ class SHAPExplainer:
             "amount_threshold_ratio": lambda v, d: (
                 f"Số tiền {'cao hơn' if d > 0 else 'thấp hơn'} {v:.1f}x ngưỡng phổ biến"
             ),
-            "dest_is_empty": lambda v, d: (
-                "Tài khoản đích chưa từng có giao dịch (dấu hiệu tài khoản mới tạo)"
-                if v == 1 else
-                "Tài khoản đích đã có lịch sử giao dịch"
-            ),
-            "type": lambda v, d: (
-                f"Loại giao dịch {v} {'có rủi ro cao' if d > 0 else 'ít rủi ro'}"
-            ),
             "amount_zscore_user": lambda v, d: (
                 f"Số tiền cao hơn {abs(v):.1f} lần độ lệch chuẩn so với lịch sử"
                 if d > 0 else
                 "Số tiền nằm trong phạm vi bình thường của người dùng"
+            ),
+            "amount_x_transfer": lambda v, d: (
+                f"Chuyển khoản số tiền lớn {'(dấu hiệu rủi ro)' if d > 0 else ''}"
+            ).strip(),
+            "amount_x_cashout": lambda v, d: (
+                f"Rút tiền số tiền lớn {'(dấu hiệu rủi ro)' if d > 0 else ''}"
+            ).strip(),
+            "amount_to_avg_ratio": lambda v, d: (
+                f"Số tiền {'cao hơn' if d > 0 else 'thấp hơn'} {v:.1f}x mức trung bình lịch sử"
+            ),
+            "large_amount_new_user": lambda v, d: (
+                "Tài khoản mới thực hiện giao dịch số tiền lớn (rủi ro cao)"
+                if (v == 1 and d > 0) else
+                "Không phát hiện pattern tài khoản mới + số tiền lớn"
+            ),
+            "dest_is_merchant": lambda v, d: (
+                "Tài khoản đích là merchant (không phải khách hàng cá nhân)"
+                if v == 1 else
+                "Tài khoản đích là khách hàng cá nhân"
+            ),
+            "is_cold_start": lambda v, d: (
+                "Tài khoản chưa có lịch sử giao dịch (cold start — dấu hiệu tài khoản mới tạo)"
+                if (v == 1 and d > 0) else
+                "Tài khoản có lịch sử giao dịch bình thường"
             ),
             "user_avg_amount": lambda v, d: (
                 f"Mức chi tiêu trung bình của người dùng: {v:,.0f}"

@@ -34,6 +34,11 @@ export interface CheckResult {
   requiresReview: boolean
   blockReason?:   string | null
   reviewReason?:  string | null
+  repeatCount?:       number | null   // Số lần giao dịch lặp
+  repeatRiskBonus?:   number | null   // Điểm risk bonus do lặp
+  baseRiskScore?:     number | null   // Risk score gốc từ ML (0-100)
+  finalRiskScore?:    number | null   // Risk score cuối (0-100)
+  accountStatus?:     string | null   // 'active' | 'frozen'
 }
 
 export interface TransactionDetail {

@@ -1,223 +1,226 @@
 /**
  * Settings/index.tsx — Trang cài đặt hệ thống.
- * Cấu hình ngưỡng rủi ro, thông báo và kết nối API.
+ * Cấu hình mô hình AI, ngưỡng rủi ro, thông báo.
+ * Load từ GET /api/v1/settings, lưu qua PUT /api/v1/settings/bulk.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Grid from '@mui/material/Grid'
 import Box from '@mui/material/Box'
-import Card from '@mui/material/Card'
-import CardContent from '@mui/material/CardContent'
-import CardHeader from '@mui/material/CardHeader'
+import CircularProgress from '@mui/material/CircularProgress'
 import Typography from '@mui/material/Typography'
-import TextField from '@mui/material/TextField'
-import Switch from '@mui/material/Switch'
-import FormControlLabel from '@mui/material/FormControlLabel'
 import Button from '@mui/material/Button'
-import Divider from '@mui/material/Divider'
-import Slider from '@mui/material/Slider'
+import Snackbar from '@mui/material/Snackbar'
 import Alert from '@mui/material/Alert'
+import { apiGet, apiPut } from '../../services/apiClient'
+import { ModelConfigSection } from './ModelConfigSection'
+import { RiskThresholdsSection } from './RiskThresholdsSection'
+import { RuleEngineSection } from './RuleEngineSection'
+import { NotificationsSection } from './NotificationsSection'
+import { SystemSecuritySection } from './SystemSecuritySection'
+import type { RiskSettings } from './RiskThresholdsSection'
+import type { NotificationsSettings } from './NotificationsSection'
+import type { SystemSecuritySettings } from './SystemSecuritySection'
 
-interface ThresholdSettings {
-  fraudProbability:  number
-  riskScoreHigh:     number
-  riskScoreCritical: number
+// ── State types ──────────────────────────────────────────────────────────────
+interface ModelSettings {
+  current_model:          string
+  model_version:          string
+  feature_engineering:    boolean
+  confidence_threshold:   number
+  calibration_method:     string
 }
 
-interface NotificationSettings {
-  emailOnCritical:  boolean
-  emailOnHigh:      boolean
-  slackWebhook:     string
-  alertCooldownMin: number
+interface AllSettingsResponse {
+  data: Record<string, Record<string, unknown>>
 }
 
+// ── Defaults ─────────────────────────────────────────────────────────────────
+const DEFAULT_MODEL: ModelSettings = {
+  current_model:        'lightgbm',
+  model_version:        'v1',
+  feature_engineering:  true,
+  confidence_threshold: 0.35,
+  calibration_method:   'isotonic',
+}
+
+const DEFAULT_RISK: RiskSettings = {
+  fraud_probability_threshold: 0.5,
+  risk_score_high:             70,
+  risk_score_critical:         90,
+}
+
+const DEFAULT_NOTIFICATIONS: NotificationsSettings = {
+  email_on_critical:   true,
+  email_on_high:       false,
+  slack_webhook:       '',
+  telegram_bot_token:  '',
+  telegram_chat_id:    '',
+  custom_webhook_url:  '',
+  alert_cooldown_min:  5,
+  routing_by_severity: false,
+  routing_config: {
+    CRITICAL: ['email', 'slack', 'telegram', 'webhook'],
+    HIGH:     ['email', 'slack'],
+    MEDIUM:   ['slack'],
+    LOW:      ['console'],
+  },
+}
+
+const DEFAULT_SYSTEM: SystemSecuritySettings = {
+  rate_limit_per_minute: 10,
+  session_timeout_min:   30,
+  ip_whitelist:          [],
+  audit_log_enabled:     true,
+  log_retention_days:    30,
+  test_mode:             false,
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
 export function Settings() {
-  const [thresholds, setThresholds] = useState<ThresholdSettings>({
-    fraudProbability:  0.5,
-    riskScoreHigh:     70,
-    riskScoreCritical: 90,
-  })
+  const [modelSettings, setModelSettings]   = useState<ModelSettings>(DEFAULT_MODEL)
+  const [riskSettings, setRiskSettings]     = useState<RiskSettings>(DEFAULT_RISK)
+  const [notifications, setNotifications]   = useState<NotificationsSettings>(DEFAULT_NOTIFICATIONS)
+  const [systemSettings, setSystemSettings] = useState<SystemSecuritySettings>(DEFAULT_SYSTEM)
+  const [loading, setLoading]               = useState(true)
+  const [saveStatus, setSaveStatus]         = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
 
-  const [notifications, setNotifications] = useState<NotificationSettings>({
-    emailOnCritical:  true,
-    emailOnHigh:      false,
-    slackWebhook:     '',
-    alertCooldownMin: 5,
-  })
+  // ── Load settings from backend ──────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false
+    apiGet<AllSettingsResponse>('/api/v1/settings')
+      .then((res) => {
+        if (cancelled) return
+        const d = res.data ?? {}
+        if (d.model) {
+          setModelSettings((prev) => ({ ...prev, ...(d.model as Partial<ModelSettings>) }))
+        }
+        if (d.risk) {
+          setRiskSettings((prev) => ({ ...prev, ...(d.risk as Partial<RiskSettings>) }))
+        }
+        if (d.notifications) {
+          setNotifications((prev) => ({ ...prev, ...(d.notifications as Partial<NotificationsSettings>) }))
+        }
+        if (d.system) {
+          setSystemSettings((prev) => ({ ...prev, ...(d.system as Partial<SystemSecuritySettings>) }))
+        }
+      })
+      .catch(() => {/* fallback to defaults */})
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
 
-  const [saved, setSaved] = useState(false)
+  // ── Bulk save ───────────────────────────────────────────────────────────
+  const handleSave = async () => {
+    setSaveStatus('saving')
+    try {
+      await apiPut('/api/v1/settings/bulk', {
+        updates: [
+          { namespace: 'model',         settings: modelSettings },
+          { namespace: 'risk',          settings: riskSettings },
+          { namespace: 'notifications', settings: notifications },
+          { namespace: 'system',        settings: systemSettings },
+        ],
+      })
+      setSaveStatus('success')
+    } catch {
+      setSaveStatus('error')
+    }
+  }
 
-  const handleSave = () => {
-    // TODO: PUT /api/v1/settings
-    setSaved(true)
-    setTimeout(() => setSaved(false), 3000)
+  // ── Helpers ─────────────────────────────────────────────────────────────
+  const handleModelChange = (key: string, value: unknown) =>
+    setModelSettings((prev) => ({ ...prev, [key]: value }))
+
+  const handleRiskChange = (key: string, value: number) =>
+    setRiskSettings((prev) => ({ ...prev, [key]: value }))
+
+  const handleNotificationsChange = (key: string, value: unknown) =>
+    setNotifications((prev) => ({ ...prev, [key]: value }))
+
+  const handleSystemChange = (key: string, value: unknown) =>
+    setSystemSettings((prev) => ({ ...prev, [key]: value }))
+
+  const handleCleanupLogs = () => {
+    // Callback sau cleanup — có thể refresh thống kê nếu cần
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 300 }}>
+        <CircularProgress />
+      </Box>
+    )
   }
 
   return (
     <Box>
+      {/* Header */}
       <Box sx={{ mb: 3 }}>
         <Typography variant="h5" sx={{ color: 'text.primary', mb: 0.5 }}>Cài đặt</Typography>
         <Typography variant="body2" color="text.secondary">
-          Cấu hình ngưỡng phát hiện, thông báo và kết nối hệ thống
+          Cấu hình mô hình AI, ngưỡng phát hiện và thông báo hệ thống
         </Typography>
       </Box>
 
-      {saved && (
-        <Alert severity="success" sx={{ mb: 3 }}>
-          Đã lưu cài đặt thành công.
-        </Alert>
-      )}
-
       <Grid container spacing={3}>
-        {/* Ngưỡng phát hiện */}
-        <Grid size={{ xs: 12, md: 6 }}>
-          <Card variant="outlined" sx={{ bgcolor: 'background.paper', borderColor: 'divider' }}>
-            <CardHeader
-              title={<Typography variant="subtitle1" fontWeight={600}>Ngưỡng phát hiện</Typography>}
-              subheader={<Typography variant="caption" color="text.secondary">Điều chỉnh độ nhạy của mô hình</Typography>}
-              sx={{ pb: 1 }}
-            />
-            <Divider />
-            <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              <Box>
-                <Typography variant="body2" color="text.secondary" gutterBottom>
-                  Ngưỡng xác suất gian lận: <strong>{(thresholds.fraudProbability * 100).toFixed(0)}%</strong>
-                </Typography>
-                <Slider
-                  value={thresholds.fraudProbability * 100}
-                  onChange={(_e, v) =>
-                    setThresholds((p) => ({ ...p, fraudProbability: (v as number) / 100 }))
-                  }
-                  min={10}
-                  max={90}
-                  step={5}
-                  marks
-                  valueLabelDisplay="auto"
-                  valueLabelFormat={(v) => `${v}%`}
-                  color="error"
-                />
-              </Box>
-
-              <Box>
-                <Typography variant="body2" color="text.secondary" gutterBottom>
-                  Ngưỡng rủi ro CAO: <strong>{thresholds.riskScoreHigh}</strong>
-                </Typography>
-                <Slider
-                  value={thresholds.riskScoreHigh}
-                  onChange={(_e, v) =>
-                    setThresholds((p) => ({ ...p, riskScoreHigh: v as number }))
-                  }
-                  min={50}
-                  max={85}
-                  step={5}
-                  marks
-                  valueLabelDisplay="auto"
-                  color="warning"
-                />
-              </Box>
-
-              <Box>
-                <Typography variant="body2" color="text.secondary" gutterBottom>
-                  Ngưỡng rủi ro NGUY HIỂM: <strong>{thresholds.riskScoreCritical}</strong>
-                </Typography>
-                <Slider
-                  value={thresholds.riskScoreCritical}
-                  onChange={(_e, v) =>
-                    setThresholds((p) => ({ ...p, riskScoreCritical: v as number }))
-                  }
-                  min={thresholds.riskScoreHigh + 5}
-                  max={99}
-                  step={1}
-                  marks
-                  valueLabelDisplay="auto"
-                  color="error"
-                />
-              </Box>
-            </CardContent>
-          </Card>
+        {/* Model & AI Config — full width */}
+        <Grid size={{ xs: 12 }}>
+          <ModelConfigSection settings={modelSettings} onChange={handleModelChange} />
         </Grid>
 
-        {/* Thông báo */}
+        {/* Risk Thresholds */}
         <Grid size={{ xs: 12, md: 6 }}>
-          <Card variant="outlined" sx={{ bgcolor: 'background.paper', borderColor: 'divider' }}>
-            <CardHeader
-              title={<Typography variant="subtitle1" fontWeight={600}>Thông báo</Typography>}
-              subheader={<Typography variant="caption" color="text.secondary">Kênh cảnh báo khi phát hiện gian lận</Typography>}
-              sx={{ pb: 1 }}
-            />
-            <Divider />
-            <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={notifications.emailOnCritical}
-                    onChange={(e) =>
-                      setNotifications((p) => ({ ...p, emailOnCritical: e.target.checked }))
-                    }
-                    color="error"
-                  />
-                }
-                label={
-                  <Box>
-                    <Typography variant="body2">Email khi có cảnh báo NGUY HIỂM</Typography>
-                    <Typography variant="caption" color="text.disabled">Gửi ngay lập tức</Typography>
-                  </Box>
-                }
-              />
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={notifications.emailOnHigh}
-                    onChange={(e) =>
-                      setNotifications((p) => ({ ...p, emailOnHigh: e.target.checked }))
-                    }
-                    color="warning"
-                  />
-                }
-                label={
-                  <Box>
-                    <Typography variant="body2">Email khi có cảnh báo CAO</Typography>
-                    <Typography variant="caption" color="text.disabled">Theo batch mỗi 15 phút</Typography>
-                  </Box>
-                }
-              />
+          <RiskThresholdsSection settings={riskSettings} onChange={handleRiskChange} />
+        </Grid>
 
-              <TextField
-                label="Slack Webhook URL"
-                value={notifications.slackWebhook}
-                onChange={(e) =>
-                  setNotifications((p) => ({ ...p, slackWebhook: e.target.value }))
-                }
-                size="small"
-                fullWidth
-                placeholder="https://hooks.slack.com/services/..."
-                type="url"
-              />
-
-              <TextField
-                label="Cooldown giữa các cảnh báo (phút)"
-                value={notifications.alertCooldownMin}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10)
-                  if (!isNaN(v) && v >= 0) {
-                    setNotifications((p) => ({ ...p, alertCooldownMin: v }))
-                  }
-                }}
-                size="small"
-                type="number"
-                inputProps={{ min: 0, max: 60 }}
-                fullWidth
-              />
-            </CardContent>
-          </Card>
+        {/* Notifications — upgraded */}
+        <Grid size={{ xs: 12, md: 6 }}>
+          <NotificationsSection settings={notifications} onChange={handleNotificationsChange} />
         </Grid>
       </Grid>
 
+      {/* Rule Engine — full width */}
+      <Box sx={{ mt: 3 }}>
+        <RuleEngineSection />
+      </Box>
+
+      {/* System & Security — full width */}
+      <Box sx={{ mt: 3 }}>
+        <SystemSecuritySection
+          settings={systemSettings}
+          onChange={handleSystemChange}
+          onCleanupLogs={handleCleanupLogs}
+        />
+      </Box>
+
       {/* Nút lưu */}
       <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end' }}>
-        <Button variant="contained" onClick={handleSave} sx={{ px: 4, fontWeight: 600 }}>
-          Lưu cài đặt
+        <Button
+          variant="contained"
+          onClick={handleSave}
+          disabled={saveStatus === 'saving'}
+          sx={{ px: 4, fontWeight: 600 }}
+        >
+          {saveStatus === 'saving' ? 'Đang lưu...' : 'Lưu cài đặt'}
         </Button>
       </Box>
+
+      {/* Snackbar feedback */}
+      <Snackbar
+        open={saveStatus === 'success' || saveStatus === 'error'}
+        autoHideDuration={4000}
+        onClose={() => setSaveStatus('idle')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          severity={saveStatus === 'success' ? 'success' : 'error'}
+          onClose={() => setSaveStatus('idle')}
+          sx={{ width: '100%' }}
+        >
+          {saveStatus === 'success' ? 'Đã lưu cài đặt thành công.' : 'Lưu cài đặt thất bại. Vui lòng thử lại.'}
+        </Alert>
+      </Snackbar>
     </Box>
   )
 }

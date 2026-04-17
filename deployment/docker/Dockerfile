@@ -18,8 +18,11 @@ COPY ml ./ml
 COPY configs ./configs
 COPY models ./models
 
+# Set PYTHONPATH so that 'from api.xxx' imports resolve inside /app/app/
+ENV PYTHONPATH=/app/app:/app
+
 # Expose port
 EXPOSE 8000
 
-# Run app
+# Run app — workdir-relative: app/ contains main.py which uses 'from api...' imports
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

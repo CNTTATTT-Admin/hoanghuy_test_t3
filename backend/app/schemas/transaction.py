@@ -15,6 +15,7 @@ class RiskLevel(str, Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
 class TransactionRequest(BaseModel):
     """Schema cho request transaction mới"""
@@ -87,6 +88,7 @@ class TransactionCheckRequest(BaseModel):
     oldbalanceOrg: float = Field(..., ge=0, description="Origin balance before transaction")
     oldbalanceDest: float = Field(..., ge=0, description="Destination balance before transaction")
     timestamp: str = Field(..., description="ISO-8601 timestamp")
+    receiver_account: Optional[str] = Field(None, description="Destination account ID (nameDest)")
 
     class Config:
         schema_extra = {
@@ -96,7 +98,8 @@ class TransactionCheckRequest(BaseModel):
                 "type": "TRANSFER",
                 "oldbalanceOrg": 150000.0,
                 "oldbalanceDest": 0.0,
-                "timestamp": "2026-03-24T10:30:00Z"
+                "timestamp": "2026-03-24T10:30:00Z",
+                "receiver_account": "C987654321"
             }
         }
 
@@ -107,6 +110,7 @@ class TransactionCheckResponse(BaseModel):
     risk_score: float = Field(..., ge=0, le=1, description="Calibrated risk score")
     risk_level: RiskLevel = Field(..., description="LOW, MEDIUM or HIGH")
     reasons: List[str] = Field(default_factory=list, description="Human-readable reasons")
+    explanation_text: Optional[str] = Field(None, description="SHAP-generated explanation text")
     timestamp: str = Field(..., description="Inference timestamp")
     type: Optional[TransactionType] = Field(None, description="Loại giao dịch")
     decision: str = Field(..., description="APPROVED, PENDING hoặc BLOCKED")
@@ -114,6 +118,11 @@ class TransactionCheckResponse(BaseModel):
     requires_review: bool = Field(False, description="True nếu cần xét duyệt thủ công")
     block_reason: Optional[str] = Field(None, description="Lý do chặn giao dịch")
     review_reason: Optional[str] = Field(None, description="Lý do cần xét duyệt")
+    repeat_count: Optional[int] = Field(None, description="Số lần giao dịch lặp")
+    repeat_risk_bonus: Optional[int] = Field(None, description="Điểm risk bonus do lặp")
+    base_risk_score: Optional[float] = Field(None, description="Risk score gốc từ ML (0-100)")
+    final_risk_score: Optional[float] = Field(None, description="Risk score cuối (0-100)")
+    account_status: Optional[str] = Field(None, description="Trạng thái tài khoản: active/frozen")
 
 
 # ─── Schema cho endpoint /authorize ──────────────────────────────────────────

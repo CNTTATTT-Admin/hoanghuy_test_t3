@@ -33,6 +33,28 @@ class RealtimeCheckService:
             audit_log_path=audit_path,
         )
 
+        # Inject sync Redis client for behavioral state persistence
+        self._inject_redis_sync()
+
+    def _inject_redis_sync(self) -> None:
+        """Try to create a sync Redis client for behavioral state persistence."""
+        try:
+            import os
+            if os.environ.get("ENABLE_REDIS", "").lower() != "true":
+                logger.warning(
+                    "[REDIS_SYNC] ENABLE_REDIS is not 'true' — behavioral state will be IN-MEMORY ONLY. "
+                    "State will be LOST on server restart."
+                )
+                return
+            import redis  # pylint: disable=import-outside-toplevel
+            redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+            client = redis.Redis.from_url(redis_url, decode_responses=True)
+            client.ping()  # Verify connection works
+            self.detector.set_redis_sync(client)
+            logger.info("[REDIS_SYNC] Connected successfully — behavioral state will be persisted to Redis")
+        except Exception as exc:
+            logger.warning("[REDIS_SYNC] Connection failed — behavioral state IN-MEMORY ONLY: %s", exc)
+
     def _build_detector_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         amount = float(payload["amount"])
         raw_type = payload["type"]
@@ -41,14 +63,22 @@ class RealtimeCheckService:
         oldbalance_org = float(payload["oldbalanceOrg"])
         oldbalance_dest = float(payload["oldbalanceDest"])
 
-        # Tính step từ timestamp — dùng giờ UTC (0–743) để simulate PaySim step
+        # Tính step từ timestamp — epoch hours để giữ temporal ordering nhất quán
+        # với behavioral feature windows (1h, 24h, 7d)
         try:
             ts = datetime.datetime.fromisoformat(
                 str(payload.get("timestamp", "")).replace("Z", "+00:00")
             )
-            step = int(ts.day * 24 + ts.hour) % 744 + 1
+            # Dùng epoch hours thay vì mod 744 — đảm bảo step luôn tăng theo thời gian
+            epoch = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+            step = max(1, int((ts - epoch).total_seconds() / 3600))
         except (ValueError, AttributeError):
-            step = int(datetime.datetime.utcnow().hour) + 1
+            epoch = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            step = max(1, int((now - epoch).total_seconds() / 3600))
+
+        # Sử dụng receiver_account thực từ request thay vì fabricate
+        name_dest = str(payload.get("receiver_account") or payload.get("nameDest") or f"C_UNKNOWN_{tx_type}")
 
         return {
             "step": step,
@@ -56,7 +86,7 @@ class RealtimeCheckService:
             "amount": amount,
             "nameOrig": user_id,
             "oldbalanceOrg": oldbalance_org,
-            "nameDest": f"COUNTERPARTY_{tx_type}",
+            "nameDest": name_dest,
             "oldbalanceDest": oldbalance_dest,
         }
 
@@ -170,40 +200,27 @@ class RealtimeCheckService:
         risk_level = str(result["risk_level"])
         reasons = list(result.get("reasons", []))
 
-        # Bước 2: Boost risk score dựa trên tín hiệu nghiệp vụ bổ sung
-        amount = float(payload.get("amount", 0))
-        oldbalance_org = float(payload.get("oldbalanceOrg", 0))
-        oldbalance_dest = float(payload.get("oldbalanceDest", 0))
-        tx_type = (payload.get("type", "").value if hasattr(payload.get("type", ""), "value") else str(payload.get("type", ""))).upper()
-
-        # Boost: tỷ lệ amount/balance cao → tăng risk
-        if oldbalance_org > 0 and amount > 0:
-            ratio = amount / oldbalance_org
-            if ratio >= 0.9 and tx_type in ("TRANSFER", "CASH_OUT"):
-                boost = min(0.3, (ratio - 0.9) * 3.0)
-                fraud_prob = min(1.0, fraud_prob + boost)
-                if ratio >= 0.9:
-                    reasons.append(f"Tỷ lệ rút/chuyển rất cao: {ratio:.1%} số dư tài khoản")
-
-        # Boost: tài khoản đích là zero-balance + giao dịch lớn
-        if oldbalance_dest == 0 and amount > 100_000 and tx_type in ("TRANSFER", "CASH_OUT"):
-            fraud_prob = min(1.0, fraud_prob + 0.15)
-            reasons.append("Tài khoản đích chưa có số dư trước giao dịch")
-
-        # Cập nhật risk_level sau boost
-        if fraud_prob >= 0.75:
-            risk_level = "HIGH"
-        elif fraud_prob >= 0.35:
-            risk_level = "MEDIUM"
+        # Extract SHAP explanation_text nếu có
+        shap_explanation = result.get("explanation")
+        explanation_text = None
+        if isinstance(shap_explanation, dict):
+            explanation_text = shap_explanation.get("explanation_text")
+            # Merge SHAP top_features vào reasons nếu reasons rỗng
+            if not reasons and shap_explanation.get("top_features"):
+                reasons = [
+                    f"{f['feature']}: {f['contribution']:.4f}"
+                    for f in shap_explanation["top_features"]
+                ]
 
         # Áp dụng fraud decision layer
         decision_result = make_fraud_decision(fraud_prob, risk_level)
 
         return {
-            "is_fraud": bool(fraud_prob >= 0.65),
+            "is_fraud": decision_result.should_block or fraud_prob >= result.get("decision_threshold", 0.02),
             "risk_score": fraud_prob,
             "risk_level": risk_level,
             "reasons": reasons,
+            "explanation_text": explanation_text,
             "timestamp": str(payload.get("timestamp", "")),
             "type": payload.get("type"),
             "decision": decision_result.decision.value,

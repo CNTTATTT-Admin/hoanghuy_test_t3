@@ -19,10 +19,10 @@ class RiskThresholds:
         manual_review_threshold: Xác suất từ ngưỡng này → allow nhưng flag để review thủ công.
     """
 
-    decision_threshold: float = 0.35
-    high_risk_threshold: float = 0.75
-    auto_block_threshold: float = 0.75       # chặn ngay, không cần review
-    manual_review_threshold: float = 0.55    # allow nhưng đánh dấu cần review
+    decision_threshold: float = 0.02
+    high_risk_threshold: float = 0.50
+    auto_block_threshold: float = 0.50       # chặn ngay, không cần review
+    manual_review_threshold: float = 0.10    # allow nhưng đánh dấu cần review
 
 
 class RiskScorer:

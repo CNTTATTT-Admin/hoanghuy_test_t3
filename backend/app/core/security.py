@@ -91,6 +91,19 @@ def create_refresh_token(data: Dict[str, Any], expires_delta: Optional[timedelta
     return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
+async def get_session_timeout() -> int:
+    """Lấy session timeout (phút) từ Settings (Redis). Fallback sang env var."""
+    try:
+        redis = await get_redis()
+        if redis:
+            val = await redis.get("settings:system:session_timeout_min")
+            if val:
+                return int(val)
+    except Exception:
+        pass
+    return ACCESS_TOKEN_EXPIRE_MINUTES  # Fallback sang env var
+
+
 def decode_token(token: str) -> Dict[str, Any]:
     """Decode và validate JWT token.
 

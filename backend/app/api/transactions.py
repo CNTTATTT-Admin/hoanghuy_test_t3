@@ -30,16 +30,38 @@ from schemas.transaction import (
 )
 from services.fraud_detection import get_fraud_detection_service
 from services.realtime_check_service import get_realtime_check_service
-from core.redis_client import get_redis
-from core.fraud_decision import make_fraud_decision, FraudDecision
+from core.redis_client import get_redis, get_repeat_risk_bonus, get_repeat_count
+from core.fraud_decision import (
+    make_fraud_decision,
+    make_fraud_decision_with_escalation,
+    FraudDecision,
+)
 from core.security import get_current_user, require_role
+from services.account_freeze_service import get_account_status, freeze_account
 from core.metrics import (
     authorize_latency_seconds,
     blocked_transactions_total,
     fraud_probability_histogram,
-    redis_cache_hits_total,
-    redis_cache_misses_total,
     transactions_total,
+)
+from services.rate_limit import _check_rate_limit
+from services.alert_service import (
+    _emit_block_alert,
+    persist_alert_if_needed,
+    persist_batch_inference_history,
+    persist_inference_history,
+)
+from services.transaction_utils import (
+    _build_transaction_detail,
+    _cache_decision,
+    _canonical_tx_key,
+    _explain_high_value,
+    _extract_risk_level,
+    _extract_risk_score,
+    _extract_user_id,
+    _get_cached_decision,
+    log_batch_transactions,
+    log_transaction,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,7 +90,99 @@ async def check_transaction(
     """Production realtime fraud check endpoint integrated with ML realtime detector."""
     try:
         payload = transaction.dict()
+
+        # ── Account freeze check ──────────────────────────────────────────
+        user_id = str(payload.get("user_id", "anonymous"))
+        account_status = await get_account_status(user_id)
+        if account_status == "frozen":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "ACCOUNT_FROZEN",
+                    "message": (
+                        f"Tài khoản {user_id} đã bị đóng băng do nghi ngờ gian lận. "
+                        "Liên hệ ADMIN để mở khóa."
+                    ),
+                    "account_status": "frozen",
+                    "decision": "BLOCKED",
+                },
+            )
+
+        # ── Rate limit check (per user_id) ────────────────────────────────
+        redis = await get_redis()
+        rate_ok, retry_after = await _check_rate_limit(user_id, redis)
+        if not rate_ok:
+            logger.warning("[RATE_LIMIT] /check user=%s BLOCKED — too many requests", user_id)
+            raise HTTPException(
+                status_code=429,
+                detail="VELOCITY_ABUSE: quá nhiều giao dịch trong 1 phút",
+                headers={"Retry-After": str(retry_after)},
+            )
+
         result = realtime_service.check_transaction(payload)
+
+        # ── Repeat risk escalation ────────────────────────────────────────
+        raw_type = payload.get("type", "")
+        tx_type_str = str(getattr(raw_type, "value", raw_type))
+        receiver = str(payload.get("receiver_account", "") or "")
+        repeat_bonus = await get_repeat_risk_bonus(
+            user_id=user_id,
+            amount=float(payload.get("amount", 0)),
+            tx_type=tx_type_str,
+            receiver=receiver,
+        )
+        repeat_count = await get_repeat_count(
+            user_id=user_id,
+            amount=float(payload.get("amount", 0)),
+            tx_type=tx_type_str,
+            receiver=receiver,
+        )
+
+        if repeat_bonus > 0:
+            # Re-run decision with escalated risk
+            base_fraud_prob = float(result.get("risk_score", 0))
+            tx_hash = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            escalated = await make_fraud_decision_with_escalation(
+                fraud_probability=base_fraud_prob,
+                risk_level=str(result.get("risk_level", "LOW")),
+                repeat_risk_bonus=repeat_bonus,
+                user_id=user_id,
+                transaction_hash=tx_hash,
+            )
+            result["risk_score"] = escalated.fraud_probability
+            result["risk_level"] = escalated.risk_level
+            result["decision"] = escalated.decision.value
+            result["should_block"] = escalated.should_block
+            result["requires_review"] = escalated.requires_review
+            result["block_reason"] = escalated.block_reason
+            result["review_reason"] = escalated.review_reason
+            result["is_fraud"] = escalated.should_block or escalated.fraud_probability >= 0.02
+
+        # Thêm thông tin repeat risk vào response
+        result["repeat_count"] = repeat_count
+        result["repeat_risk_bonus"] = repeat_bonus
+        result["base_risk_score"] = float(result.get("risk_score", 0)) * 100 if repeat_bonus == 0 else (float(result.get("risk_score", 0)) * 100 - repeat_bonus)
+        result["final_risk_score"] = float(result.get("risk_score", 0)) * 100
+        result["account_status"] = account_status
+
+        # ── Auto-freeze: đóng băng tài khoản khi BLOCKED ─────────────────
+        final_decision = str(result.get("decision", "")).upper()
+        if final_decision == "BLOCKED" and account_status != "frozen":
+            tx_hash_freeze = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            freeze_ok = await freeze_account(
+                user_id=user_id,
+                fraud_probability=float(result.get("risk_score", 0)),
+                reason=f"Auto-freeze: transaction BLOCKED (risk_score={result.get('risk_score', 0):.4f})",
+                transaction_hash=tx_hash_freeze,
+                triggered_by="SYSTEM_AUTO",
+            )
+            if freeze_ok:
+                result["account_status"] = "frozen"
+
         # Gán transaction_id để alert có mã giao dịch hiển thị trên header bell
         if "transaction_id" not in result or not result["transaction_id"]:
             result["transaction_id"] = f"CHK-{uuid4().hex[:12].upper()}"
@@ -77,95 +191,14 @@ async def check_transaction(
         # Loại transaction_id trước khi trả response (schema không có field này)
         response_data = {k: v for k, v in result.items() if k != "transaction_id"}
         return TransactionCheckResponse(**response_data)
+    except HTTPException:
+        raise
     except ValueError as e:
         logger.warning(f"Realtime check validation error: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error in realtime check: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# ─── Hàm hỗ trợ Redis cho endpoint /authorize ────────────────────────────────
-
-def _canonical_tx_key(tx: dict) -> str:
-    """Tạo cache key duy nhất từ canonical JSON của giao dịch (sha256).
-
-    Canonical JSON: sắp xếp key, không có khoảng trắng.
-    """
-    # Chỉ lấy các trường ảnh hưởng tới quyết định gian lận
-    relevant = {
-        k: (getattr(v, "value", v) if hasattr(v, "value") else v)
-        for k, v in tx.items()
-        if k in ("step", "type", "amount", "nameOrig", "nameDest",
-                 "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest")
-    }
-    canonical = json.dumps(dict(sorted(relevant.items())), separators=(",", ":"))
-    digest = hashlib.sha256(canonical.encode()).hexdigest()
-    return f"decision:{digest}"
-
-
-async def _get_cached_decision(tx: dict, redis) -> dict | None:
-    """Kiểm tra decision cache trong Redis.
-
-    Cache key: "decision:{sha256(canonical_json(tx))}"
-    TTL: 60 giây.
-    Use case: payment gateway retry khi timeout → không re-compute ML.
-    Trả về cached result nếu hit, None nếu miss hoặc redis=None.
-    """
-    if redis is None:
-        return None
-    try:
-        key = _canonical_tx_key(tx)
-        raw = await redis.get(key)
-        if raw is None:
-            redis_cache_misses_total.inc()  # Cache miss — sẽ chạy ML inference
-            return None
-        redis_cache_hits_total.inc()        # Cache hit — trả kết quả cached
-        return json.loads(raw)
-    except Exception as exc:
-        logger.debug("Cache get lỗi, bỏ qua: %s", exc)
-        return None
-
-
-async def _cache_decision(tx: dict, result: dict, redis) -> None:
-    """Lưu kết quả quyết định vào Redis cache sau khi inference xong.
-
-    Chỉ lưu nếu redis không None. TTL: 60 giây.
-    """
-    if redis is None:
-        return
-    try:
-        key = _canonical_tx_key(tx)
-        await redis.set(key, json.dumps(result, ensure_ascii=False), ex=60)
-    except Exception as exc:
-        logger.debug("Cache set lỗi, bỏ qua: %s", exc)
-
-
-async def _check_rate_limit(name_orig: str, redis) -> tuple[bool, int]:
-    """Kiểm tra rate limit theo cửa sổ 1 phút cho user.
-
-    Key: "ratelimit:{name_orig}:{YYYY-MM-DD:HH:MM}" — cửa sổ 1 phút.
-    Logic:
-      count = INCR key
-      if count == 1: EXPIRE key 60
-      if count > 10: return (False, 60)  → VELOCITY_ABUSE
-    Trả về (True, 0) nếu OK, (False, 60) nếu vượt giới hạn.
-    Nếu redis=None: luôn trả về (True, 0) — không rate limit khi Redis down.
-    """
-    if redis is None:
-        return True, 0
-    try:
-        window = datetime.datetime.utcnow().strftime("%Y-%m-%d:%H:%M")
-        key = f"ratelimit:{name_orig}:{window}"
-        count = await redis.incr(key)
-        if count == 1:
-            await redis.expire(key, 60)  # TTL bắt buộc — không để key tồn tại vĩnh viễn
-        if count > 10:
-            return False, 60
-        return True, 0
-    except Exception as exc:
-        logger.debug("Rate limit check lỗi, bỏ qua: %s", exc)
-        return True, 0  # graceful degradation: nếu Redis lỗi → cho phép
 
 
 # ─── Hàm hỗ trợ cho endpoint /authorize ─────────────────────────────────────
@@ -219,9 +252,9 @@ def _rule_based_precheck(tx: dict) -> dict | None:
         and new_bal_orig == 0.0
     ):
         return {
-            "fraud_probability": 0.85,
+            "fraud_probability": 0.92,
             "risk_level": "HIGH",
-            "block": False,  # flag HIGH nhưng để ML/threshold quyết định
+            "block": True,  # Thống nhất với RULE_DRAIN_ACCOUNT ở các service khác
             "reason": "Origin balance fully drained in transfer",
             "triggered_by": "RULE_DRAIN_ORIGIN",
         }
@@ -337,52 +370,6 @@ async def _audit_log_decision(
         logger.warning("Audit log write failed: %s", exc)
 
 
-async def _emit_block_alert(tx_payload: dict, fraud_prob: float, transaction_id: str) -> None:
-    """Lưu alert FRAUD_BLOCKED vào bảng alerts để frontend polling hiển thị
-    thông báo trong thanh header.
-    Không ném exception — lỗi chỉ được ghi log.
-    """
-    from datetime import timezone as _tz
-
-    if not is_db_enabled():
-        return
-    details = {
-        "tx_type":        str(getattr(tx_payload.get("type", ""), "value",
-                                     tx_payload.get("type", ""))) or None,
-        "amount":         float(tx_payload["amount"]) if tx_payload.get("amount") is not None else None,
-        "name_orig":      str(tx_payload.get("nameOrig", "")) or None,
-        "block_reason":   f"Tự động chặn: xác suất gian lận {fraud_prob:.1%}",
-        "blocked_at":     datetime.datetime.now(_tz.utc).isoformat(),
-        "transaction_id": transaction_id,
-        "risk_score":     fraud_prob,
-    }
-    try:
-        conn = await acquire_connection()
-        try:
-            await conn.execute(
-                """
-                INSERT INTO alerts
-                    (alert_id, type, message, severity, status, source_endpoint,
-                     timestamp, details, created_at, acknowledged_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                """,
-                str(uuid4()),
-                "FRAUD_BLOCKED",
-                f"Giao dịch bị chặn tự động: xác suất gian lận {fraud_prob:.1%}",
-                "high",
-                "blocked",
-                "/transactions/authorize",
-                datetime.datetime.now(_tz.utc).isoformat(),
-                details,
-                datetime.datetime.now(_tz.utc),
-                None,
-            )
-        finally:
-            await release_connection(conn)
-    except Exception as exc:
-        logger.warning("_emit_block_alert failed: %s", exc)
-
-
 @router.post(
     "/transactions/authorize",
     responses={
@@ -413,6 +400,27 @@ async def authorize_transaction(
     # Tạo ID duy nhất cho giao dịch này
     transaction_id = f"TXN-{uuid4().hex[:12].upper()}"
     reference_id = f"FD-{uuid4().hex[:8].upper()}"
+
+    # ── Account freeze check ──────────────────────────────────────────
+    name_orig = str(payload.get("nameOrig", ""))
+    account_status = await get_account_status(name_orig)
+    if account_status == "frozen":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "authorized": False,
+                "transaction_id": transaction_id,
+                "block_reason": (
+                    f"ACCOUNT_FROZEN: Tài khoản {name_orig} đã bị đóng băng "
+                    "do nghi ngờ gian lận. Liên hệ ADMIN để mở khóa."
+                ),
+                "risk_level": "CRITICAL",
+                "fraud_probability": 1.0,
+                "decision": "BLOCKED",
+                "account_status": "frozen",
+                "reference_id": reference_id,
+            },
+        )
 
     # Lấy chuỗi type để trả về trong response
     _type_raw = payload.get("type")
@@ -529,7 +537,17 @@ async def authorize_transaction(
             fraud_probability = float(ml_result.get("fraud_probability", ml_result.get("risk_score", 0.0)))
             triggered_by = "ML_MODEL"
 
-        # ── [5] Decision Layer — tách biệt khỏi model ML ─────────────────
+        # ── [5] Repeat risk escalation ────────────────────────────────────
+        _auth_tx_type_str = str(getattr(payload.get("type", ""), "value", payload.get("type", "")))
+        name_dest = str(payload.get("nameDest", ""))
+        repeat_bonus = await get_repeat_risk_bonus(
+            user_id=name_orig,
+            amount=float(payload.get("amount", 0)),
+            tx_type=_auth_tx_type_str,
+            receiver=name_dest,
+        )
+
+        # ── [6] Decision Layer — tách biệt khỏi model ML ─────────────────
         # Tính risk_level trước để truyền vào decision layer
         if fraud_probability >= 0.90:
             risk_level_str = "HIGH"
@@ -540,7 +558,23 @@ async def authorize_transaction(
         else:
             risk_level_str = "LOW"
 
-        fd_result = make_fraud_decision(fraud_probability, risk_level_str)
+        # Sử dụng decision with escalation nếu có repeat bonus
+        if repeat_bonus > 0:
+            tx_hash = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            fd_result = await make_fraud_decision_with_escalation(
+                fraud_probability=fraud_probability,
+                risk_level=risk_level_str,
+                repeat_risk_bonus=repeat_bonus,
+                user_id=name_orig,
+                transaction_hash=tx_hash,
+            )
+            fraud_probability = fd_result.fraud_probability
+            risk_level_str = fd_result.risk_level
+        else:
+            fd_result = make_fraud_decision(fraud_probability, risk_level_str)
+
         _tx_type_str = str(getattr(payload.get("type", "UNKNOWN"), "value", payload.get("type", "UNKNOWN")))
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -549,6 +583,19 @@ async def authorize_transaction(
 
         if fd_result.should_block:
             # ── BLOCKED → HTTP 403 ──────────────────────────────────────────
+            # Auto-freeze tài khoản khi bị BLOCK
+            if account_status != "frozen":
+                freeze_tx_hash = hashlib.sha256(
+                    json.dumps(payload, sort_keys=True, default=str).encode()
+                ).hexdigest()[:16]
+                freeze_ok = await freeze_account(
+                    user_id=name_orig,
+                    fraud_probability=fraud_probability,
+                    reason=f"Auto-freeze: authorize BLOCKED (fraud_prob={fraud_probability:.4f})",
+                    transaction_hash=freeze_tx_hash,
+                    triggered_by="SYSTEM_AUTO",
+                )
+
             block_resp = {
                 "authorized": False,
                 "transaction_id": transaction_id,
@@ -626,6 +673,21 @@ async def authorize_transaction(
              "risk_score": fraud_probability, "risk_level": risk_level_str,
              "decision": fd_result.decision.value, "transaction_id": transaction_id},
         )
+        # Persist alert for PENDING fraud (BLOCKED alerts already created via _emit_block_alert)
+        if fd_result.requires_review:
+            alert_result = {
+                "is_fraud": True,
+                "risk_score": fraud_probability,
+                "risk_level": risk_level_str,
+                "decision": fd_result.decision.value,
+                "should_block": fd_result.should_block,
+                "block_reason": fd_result.block_reason,
+                "transaction_id": transaction_id,
+                "reasons": [fd_result.review_reason or f"Fraud probability {fraud_probability:.1%}"],
+            }
+            background_tasks.add_task(
+                persist_alert_if_needed, "/transactions/authorize", payload, alert_result,
+            )
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         authorize_latency_seconds.observe(elapsed_ms / 1000)  # Ghi tổng latency /authorize (tính bằng giây)
@@ -669,21 +731,90 @@ async def detect_fraud(
         # Convert Pydantic model to dict
         transaction_dict = transaction.dict()
 
+        # ── Account freeze check ──────────────────────────────────────
+        detect_user_id = str(transaction_dict.get("nameOrig", ""))
+        detect_account_status = await get_account_status(detect_user_id)
+        if detect_account_status == "frozen":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "ACCOUNT_FROZEN",
+                    "message": (
+                        f"Tài khoản {detect_user_id} đã bị đóng băng do nghi ngờ gian lận. "
+                        "Liên hệ ADMIN để mở khóa."
+                    ),
+                    "account_status": "frozen",
+                    "decision": "BLOCKED",
+                },
+            )
+
         # Add background task for additional processing if needed
         background_tasks.add_task(log_transaction, transaction_dict)
 
         # Detect fraud
         result = fraud_service.detect_fraud(transaction_dict)
 
-        # Áp dụng decision layer — giống /transactions/check
+        # ── Repeat risk escalation ────────────────────────────────────
+        detect_tx_type = str(getattr(transaction_dict.get("type", ""), "value", transaction_dict.get("type", "")))
+        detect_name_dest = str(transaction_dict.get("nameDest", ""))
+        detect_repeat_bonus = await get_repeat_risk_bonus(
+            user_id=detect_user_id,
+            amount=float(transaction_dict.get("amount", 0)),
+            tx_type=detect_tx_type,
+            receiver=detect_name_dest,
+        )
+        detect_repeat_count = await get_repeat_count(
+            user_id=detect_user_id,
+            amount=float(transaction_dict.get("amount", 0)),
+            tx_type=detect_tx_type,
+            receiver=detect_name_dest,
+        )
+
+        # Áp dụng decision layer
         fraud_prob = _extract_risk_score(result)
         risk_level = _extract_risk_level(result)
-        fd = make_fraud_decision(fraud_prob, risk_level)
+
+        if detect_repeat_bonus > 0:
+            detect_tx_hash = hashlib.sha256(
+                json.dumps(transaction_dict, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            fd = await make_fraud_decision_with_escalation(
+                fraud_probability=fraud_prob,
+                risk_level=risk_level,
+                repeat_risk_bonus=detect_repeat_bonus,
+                user_id=detect_user_id,
+                transaction_hash=detect_tx_hash,
+            )
+        else:
+            fd = make_fraud_decision(fraud_prob, risk_level)
+
         result["decision"]       = fd.decision.value
         result["should_block"]   = fd.should_block
         result["requires_review"] = fd.requires_review
         result["block_reason"]   = fd.block_reason
         result["review_reason"]  = fd.review_reason
+        result["risk_score"]     = fd.fraud_probability
+        result["risk_level"]     = fd.risk_level
+
+        # Thêm thông tin repeat risk
+        result["repeat_count"] = detect_repeat_count
+        result["repeat_risk_bonus"] = detect_repeat_bonus
+        result["account_status"] = detect_account_status
+
+        # ── Auto-freeze: đóng băng tài khoản khi BLOCKED ─────────────────
+        if fd.should_block and detect_account_status != "frozen":
+            detect_freeze_hash = hashlib.sha256(
+                json.dumps(transaction_dict, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            freeze_ok = await freeze_account(
+                user_id=detect_user_id,
+                fraud_probability=fd.fraud_probability,
+                reason=f"Auto-freeze: detect-fraud BLOCKED (fraud_prob={fd.fraud_probability:.4f})",
+                transaction_hash=detect_freeze_hash,
+                triggered_by="SYSTEM_AUTO",
+            )
+            if freeze_ok:
+                result["account_status"] = "frozen"
 
         background_tasks.add_task(persist_inference_history, "/detect-fraud", transaction_dict, result)
         background_tasks.add_task(persist_alert_if_needed, "/detect-fraud", transaction_dict, result)
@@ -1032,241 +1163,5 @@ async def get_inference_history(
         logger.error("inference-history error: %s", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-def _explain_high_value(amount: float | None) -> str | None:
-    """Trả về cảnh báo nếu giao dịch có giá trị lớn (> 10 000 đơn vị)."""
-    if not amount:
-        return None
-    if amount > 10_000:
-        return f"Giá trị giao dịch {amount:,.0f} vượt ngưỡng cảnh báo giao dịch lớn."
-    return None
 
 
-def _build_transaction_detail(row: dict) -> dict:
-    """
-    Làm phẳng các trường từ JSONB 'explanation' ra top-level.
-    Ưu tiên top-level column; fallback về JSONB nếu column trống.
-    """
-    explanation = row.get("explanation") or {}
-    return {
-        "transaction_id":    row.get("transaction_id"),
-        "type":              row.get("type") or explanation.get("type"),
-        "amount":            row.get("amount"),
-        "name_orig":         row.get("name_orig") or explanation.get("name_orig"),
-        "name_dest":         row.get("name_dest") or explanation.get("name_dest"),
-        "fraud_score":       row.get("fraud_score"),
-        "risk_level":        row.get("risk_level"),
-        "decision":          row.get("decision"),
-        "status":            row.get("status"),
-        "key_factors":       explanation.get("key_factors") or [],
-        "recommendations":   explanation.get("recommendations") or [],
-        "high_value_reason": _explain_high_value(row.get("amount")),
-        "processed_at":      str(row.get("processed_at") or ""),
-    }
-
-
-async def log_transaction(transaction: Dict[str, Any]):
-    try:
-        logger.info(f"Transaction logged: {transaction.get('nameOrig', 'unknown')}")
-        # Here you could save to database, send to monitoring system, etc.
-    except Exception as e:
-        logger.error(f"Error logging transaction: {str(e)}")
-
-async def log_batch_transactions(transactions: list[Dict[str, Any]]):
-    """Background task để ghi log batch giao dịch"""
-    try:
-        logger.info(f"Batch transactions logged: {len(transactions)} transactions")
-        # Here you could save to database, send to monitoring system, etc.
-    except Exception as e:
-        logger.error(f"Error logging batch transactions: {str(e)}")
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _extract_event_timestamp(payload: Dict[str, Any]) -> str:
-    raw = payload.get("timestamp")
-    if isinstance(raw, str) and raw:
-        return raw
-    return utcnow().isoformat()
-
-
-def _extract_user_id(payload: Dict[str, Any]) -> str:
-    return str(payload.get("user_id") or payload.get("nameOrig") or "unknown")
-
-
-def _extract_risk_level(result: Dict[str, Any]) -> str:
-    if result.get("risk_level") is not None:
-        return str(result.get("risk_level"))
-    explanation = result.get("explanation", {})
-    if isinstance(explanation, dict) and explanation.get("risk_level") is not None:
-        return str(explanation.get("risk_level"))
-    return "UNKNOWN"
-
-
-def _extract_risk_score(result: Dict[str, Any]) -> float:
-    if result.get("risk_score") is not None:
-        return _safe_float(result.get("risk_score"))
-    if result.get("fraud_score") is not None:
-        return _safe_float(result.get("fraud_score"))
-    if result.get("model_score") is not None:
-        return _safe_float(result.get("model_score"))
-    return 0.0
-
-
-def _extract_reasons(result: Dict[str, Any]) -> list[str]:
-    if isinstance(result.get("reasons"), list):
-        return [str(reason) for reason in result.get("reasons", [])]
-
-    explanation = result.get("explanation", {})
-    if isinstance(explanation, dict) and isinstance(explanation.get("key_factors"), list):
-        return [str(reason) for reason in explanation.get("key_factors", [])]
-
-    return []
-
-
-async def persist_inference_history(
-    source_endpoint: str,
-    payload: Dict[str, Any],
-    result: Dict[str, Any],
-) -> None:
-    """Lưu một cặp request/response inference vào PostgreSQL."""
-    if not is_db_enabled():
-        return
-
-    try:
-        import json
-        conn = await acquire_connection()
-        try:
-            await conn.execute(
-                """
-                INSERT INTO inference_history
-                    (request_id, source_endpoint, user_id, transaction_type, amount,
-                     inference_timestamp, input, output, is_fraud, risk_score, risk_level, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                """,
-                str(uuid4()),
-                source_endpoint,
-                _extract_user_id(payload),
-                str(getattr(payload.get("type", "UNKNOWN"), "value", payload.get("type", "UNKNOWN"))),
-                _safe_float(payload.get("amount")),
-                _extract_event_timestamp(payload),
-                payload,
-                result,
-                result.get("is_fraud"),
-                _extract_risk_score(result),
-                _extract_risk_level(result),
-                utcnow(),
-            )
-        finally:
-            await release_connection(conn)
-    except Exception as exc:
-        logger.warning("Failed to persist inference history: %s", exc)
-
-
-async def persist_alert_if_needed(
-    source_endpoint: str,
-    payload: Dict[str, Any],
-    result: Dict[str, Any],
-) -> None:
-    """Lưu cảnh báo gian lận khi model phân loại giao dịch là fraud.
-
-    - Nếu decision == BLOCKED (hoặc should_block == True): lưu type=FRAUD_BLOCKED, status=blocked
-    - Các trường hợp gian lận khác: lưu type=FRAUD_DETECTED, status=open
-    """
-    if not is_db_enabled():
-        return
-
-    is_fraud = result.get("is_fraud")
-    if is_fraud is not True:
-        return
-
-    try:
-        conn = await acquire_connection()
-        try:
-            # Xác định type và status alert theo decision layer
-            decision   = str(result.get("decision") or "").upper()
-            should_block = result.get("should_block") is True
-            is_blocked = (decision == "BLOCKED") or should_block
-
-            alert_type   = "FRAUD_BLOCKED" if is_blocked else "FRAUD_DETECTED"
-            alert_status = "blocked"       if is_blocked else "open"
-            fraud_prob   = _extract_risk_score(result)
-
-            # Lấy transaction_id từ result (authorize) hoặc payload (check)
-            transaction_id = (
-                result.get("transaction_id")
-                or str(payload.get("transaction_id") or "")
-                or None
-            )
-            block_reason = (
-                result.get("block_reason")
-                or (f"Tự động chặn: xác suất gian lận {fraud_prob:.1%}" if is_blocked else None)
-            )
-            details = {
-                "transaction_id": transaction_id,
-                "tx_type":        str(getattr(payload.get("type", "UNKNOWN"), "value", payload.get("type", "UNKNOWN"))),
-                "amount":         _safe_float(payload.get("amount")),
-                "risk_score":     fraud_prob,
-                "risk_level":     _extract_risk_level(result),
-                "nameOrig":       str(payload.get("nameOrig") or payload.get("user_id") or ""),
-                "nameDest":       str(payload.get("nameDest") or ""),
-                "reasons":        _extract_reasons(result),
-                "block_reason":   block_reason,
-                "blocked_at":     utcnow().isoformat() if is_blocked else None,
-                "assigned_to":    None,
-            }
-            message = (
-                f"Giao dịch bị chặn tự động: xác suất gian lận {fraud_prob:.1%}"
-                if is_blocked
-                else "Fraudulent transaction detected by realtime model"
-            )
-            await conn.execute(
-                """
-                INSERT INTO alerts
-                    (alert_id, type, message, severity, status, source_endpoint,
-                     timestamp, details, created_at, acknowledged_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                """,
-                str(uuid4()),
-                alert_type,
-                message,
-                "high" if _extract_risk_level(result) == "HIGH" else "medium",
-                alert_status,
-                source_endpoint,
-                _extract_event_timestamp(payload),
-                details,
-                utcnow(),
-                None,
-            )
-        finally:
-            await release_connection(conn)
-    except Exception as exc:
-        logger.warning("Failed to persist fraud alert: %s", exc)
-
-
-async def persist_batch_inference_history(
-    source_endpoint: str,
-    payloads: list[Dict[str, Any]],
-    results: list[Dict[str, Any]],
-    persist_alerts: bool = True,
-) -> None:
-    """Persist batch inference history as individual records.
-
-    Args:
-        persist_alerts: Set False khi gọi từ batch_detect_fraud — alerts đã được
-                        persist đồng bộ trong endpoint để tránh tạo duplicate.
-    """
-    if len(payloads) != len(results):
-        logger.warning("Batch persistence skipped due to payload/result size mismatch.")
-        return
-
-    for payload, result in zip(payloads, results):
-        await persist_inference_history(source_endpoint, payload, result)
-        if persist_alerts:
-            await persist_alert_if_needed(source_endpoint, payload, result)

@@ -77,3 +77,6 @@ docker-compose.override.yml
 prompts/
 
 node_modules/
+dist/
+.vite/
+frontend/.vite/

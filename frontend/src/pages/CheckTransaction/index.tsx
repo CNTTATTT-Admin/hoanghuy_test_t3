@@ -85,9 +85,12 @@ export function CheckTransaction() {
         oldbalanceOrg:  parseFloat(form.balance) || 0,
         oldbalanceDest: parseFloat(form.balanceDest) || 0,
         timestamp:      new Date(form.timestamp).toISOString(),
+        // Pass receiver_account for accurate dest_is_merchant feature
+        ...(form.receiverAccount?.trim() && {
+          receiver_account: form.receiverAccount.trim(),
+        }),
         // Metadata bổ sung theo loại giao dịch
         ...(form.type === 'TRANSFER' && {
-          receiver_account: form.receiverAccount,
           receiver_name:    form.receiverName || undefined,
         }),
         ...(form.type === 'CASH_OUT' && {
@@ -104,6 +107,7 @@ export function CheckTransaction() {
         risk_score:      number
         risk_level:      string
         reasons:         string[]
+        explanation_text?: string | null
         timestamp:       string
         type?:           string
         decision:        string
@@ -111,11 +115,16 @@ export function CheckTransaction() {
         requires_review: boolean
         block_reason?:   string | null
         review_reason?:  string | null
+        repeat_count?:       number | null
+        repeat_risk_bonus?:  number | null
+        base_risk_score?:    number | null
+        final_risk_score?:   number | null
+        account_status?:     string | null
       }>('/api/v1/transactions/check', payload)
 
       // Map response backend → CheckResult frontend
       const levelMap: Record<string, CheckResult['riskLevel']> = {
-        LOW: 'low', MEDIUM: 'medium', HIGH: 'high',
+        LOW: 'low', MEDIUM: 'medium', HIGH: 'high', CRITICAL: 'critical',
       }
       const decisionMap: Record<string, CheckResult['decision']> = {
         BLOCKED: 'BLOCKED', PENDING: 'PENDING', APPROVED: 'APPROVED',
@@ -125,7 +134,7 @@ export function CheckTransaction() {
         probability:    res.risk_score,
         riskScore:      Math.round(res.risk_score * 100),
         riskLevel:      levelMap[res.risk_level] ?? 'medium',
-        explanation:    res.reasons.join(' '),
+        explanation:    res.explanation_text || res.reasons.join(' '),
         reasons:        res.reasons,
         type:           res.type,
         decision:       decisionMap[res.decision] ?? 'APPROVED',
@@ -133,6 +142,11 @@ export function CheckTransaction() {
         requiresReview: res.requires_review,
         blockReason:    res.block_reason ?? null,
         reviewReason:   res.review_reason ?? null,
+        repeatCount:       res.repeat_count ?? null,
+        repeatRiskBonus:   res.repeat_risk_bonus ?? null,
+        baseRiskScore:     res.base_risk_score ?? null,
+        finalRiskScore:    res.final_risk_score ?? null,
+        accountStatus:     res.account_status ?? null,
       }
       setResult(mapped)
       setSessionHistory(prev => [...prev, { amount: parseFloat(form.amount) || 0 }])

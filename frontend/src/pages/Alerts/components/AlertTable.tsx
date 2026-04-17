@@ -29,6 +29,7 @@ import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import GppBadOutlinedIcon from '@mui/icons-material/GppBadOutlined'
 import VerifiedOutlinedIcon from '@mui/icons-material/VerifiedOutlined'
+import LockOpenOutlinedIcon from '@mui/icons-material/LockOpenOutlined'
 import type { AlertRecord, SortField, SortDirection } from '../types'
 import { riskLabels, statusConfig } from '../types'
 import { TxTypeBadge } from '../../../components/TxTypeBadge'
@@ -135,6 +136,7 @@ interface AlertTableProps {
   onMarkLegit:   (id: string) => Promise<void>
   onAssign:      (id: string) => void
   onAddComment:  (id: string) => void
+  onUnfreeze?:   (alert: AlertRecord) => Promise<void>
   sortField?:    SortField
   sortDirection?: SortDirection
   onSort?:       (field: SortField) => void
@@ -143,7 +145,7 @@ interface AlertTableProps {
 export function AlertTable({
   data, page, rowsPerPage, onPageChange,
   onViewDetail, onIgnore, onResolve, onEscalate,
-  onMarkFraud, onMarkLegit, onAssign, onAddComment,
+  onMarkFraud, onMarkLegit, onAssign, onAddComment, onUnfreeze,
   sortField, sortDirection, onSort,
 }: AlertTableProps) {
   const paged = data.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage)
@@ -421,6 +423,13 @@ export function AlertTable({
                             <CheckCircleOutlineIcon sx={{ fontSize: 15 }} />
                           </IconButton>
                         </Tooltip>
+                        {row.status === 'blocked' && onUnfreeze && (
+                          <Tooltip title="Mở khóa tài khoản">
+                            <IconButton size="small" sx={{ color: '#22c55e', '&:hover': { color: '#4ade80' } }} onClick={() => onUnfreeze(row)}>
+                              <LockOpenOutlinedIcon sx={{ fontSize: 15 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )}
                         <Tooltip title="Hành động khác">
                           <IconButton size="small" sx={{ color: '#6b7280', '&:hover': { color: '#9ca3af' } }} onClick={(e) => openMenu(e, row)}>
                             <MoreVertIcon sx={{ fontSize: 15 }} />
@@ -552,6 +561,15 @@ export function AlertTable({
           <PriorityHighIcon sx={{ fontSize: 16 }} />
           Escalate
         </MenuItem>
+        {menuRow?.status === 'blocked' && onUnfreeze && (
+          <MenuItem
+            onClick={async () => { if (menuRow) { await onUnfreeze(menuRow); closeMenu() } }}
+            sx={{ color: '#22c55e !important' }}
+          >
+            <LockOpenOutlinedIcon sx={{ fontSize: 16 }} />
+            Mở khóa tài khoản
+          </MenuItem>
+        )}
       </Menu>
 
       <TablePagination

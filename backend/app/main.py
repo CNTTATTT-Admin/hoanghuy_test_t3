@@ -23,7 +23,12 @@ from api.analytics import router as analytics_router
 from api.users import router as users_router
 from api.auth import router as auth_router
 from api.admin_users import router as admin_users_router
-from core.redis_client import close_redis, redis_health
+from api.settings import router as settings_router
+from api.settings import _seed_defaults as seed_settings_defaults
+from api.rules import router as rules_router
+from api.rules import _seed_default_rules
+from api.accounts import router as accounts_router
+from core.redis_client import close_redis, get_redis, redis_health
 from db.database import close_db, init_db, is_db_enabled
 from logger import setup_logging
 from notifier import get_notifier
@@ -86,11 +91,29 @@ async def lifespan(app: FastAPI):
         logger.info("PostgreSQL integration enabled.")
         # Seed tài khoản admin mặc định nếu bảng users rỗng
         await _seed_default_admin()
+        # Seed giá trị mặc định cho settings
+        await seed_settings_defaults()
+        await _seed_default_rules()
     else:
         logger.warning("PostgreSQL integration disabled. Running without persistence.")
 
     # Kiểm tra kết nối SMTP khi khởi động (non-critical — không dừng server nếu lỗi)
     await verify_smtp_connection()
+
+    # ── Redis startup check ───────────────────────────────────────────────
+    _redis = await get_redis()
+    if _redis is not None:
+        logger.info(
+            "✅ Redis connected — REDIS_URL=%s  |  Rate-limit: Redis-backed  |  Behavioral state: persistent",
+            os.getenv("REDIS_URL", "(default)"),
+        )
+    else:
+        logger.warning(
+            "⚠️  Redis NOT available — ENABLE_REDIS=%s  REDIS_URL=%s  |  "
+            "Rate-limit: in-memory only  |  Behavioral state: will reset on restart",
+            os.getenv("ENABLE_REDIS", "(not set)"),
+            os.getenv("REDIS_URL", "(not set)"),
+        )
 
     # Khởi động Kafka producer/consumer nếu ENABLE_KAFKA=true
     _kafka_producer = None
@@ -246,6 +269,15 @@ app.include_router(
     prefix="/api/v1",
     tags=["admin"]
 ) # Router quản lý tài khoản hệ thống — chỉ ADMIN
+
+app.include_router(settings_router) # Router cài đặt hệ thống — ADMIN only
+app.include_router(rules_router)    # Router quản lý Rule Engine — ADMIN only
+
+app.include_router(
+    accounts_router,
+    prefix="/api/v1",
+    tags=["accounts"],
+) # Router quản lý trạng thái tài khoản — freeze/unfreeze
 
 @app.get("/")
 async def root():
