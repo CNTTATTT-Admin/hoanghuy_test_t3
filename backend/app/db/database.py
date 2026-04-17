@@ -228,6 +228,73 @@ async def _ensure_tables() -> None:
             "ON drift_reports (severity, timestamp DESC);"
         )
 
+        # ── Bảng users — lưu tài khoản hệ thống (auth) ──────────────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id                      BIGSERIAL PRIMARY KEY,
+                user_uid                VARCHAR(64)  UNIQUE NOT NULL,
+                email                   VARCHAR(255) UNIQUE NOT NULL,
+                password_hash           VARCHAR(255) NOT NULL,
+                full_name               VARCHAR(255) NOT NULL,
+                role                    VARCHAR(50)  NOT NULL DEFAULT 'USER',
+                is_active               BOOLEAN NOT NULL DEFAULT FALSE,
+                is_email_verified       BOOLEAN NOT NULL DEFAULT FALSE,
+                email_verify_token      VARCHAR(255),
+                email_verify_expires_at TIMESTAMPTZ,
+                created_at              TIMESTAMPTZ DEFAULT NOW(),
+                updated_at              TIMESTAMPTZ DEFAULT NOW(),
+                last_login_at           TIMESTAMPTZ
+            );
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_user_uid ON users (user_uid);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_role ON users (role);"
+        )
+
+        # ── Bảng token_blacklist — JWT đã bị vô hiệu (logout) ───────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS token_blacklist (
+                id         BIGSERIAL PRIMARY KEY,
+                jti        VARCHAR(128) UNIQUE NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_token_blacklist_jti "
+            "ON token_blacklist (jti);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_token_blacklist_expires "
+            "ON token_blacklist (expires_at);"
+        )
+
+        # ── Bảng user_audit_log — lịch sử thay đổi role/status ──────────────
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_audit_log (
+                id              BIGSERIAL PRIMARY KEY,
+                target_user_uid VARCHAR(64) NOT NULL,
+                action          VARCHAR(50) NOT NULL,
+                old_value       VARCHAR(100),
+                new_value       VARCHAR(100),
+                changed_by_uid  VARCHAR(64),
+                created_at      TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_target "
+            "ON user_audit_log (target_user_uid);"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_created "
+            "ON user_audit_log (created_at DESC);"
+        )
+
     logger.info("PostgreSQL tables and indexes ensured.")
 
 

@@ -1,7 +1,7 @@
 """User API Endpoints"""
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any, Optional
 import logging
 
@@ -12,7 +12,7 @@ from db.database import (
     record_to_dict,
     utcnow,
 )
-
+from core.security import get_current_user, require_role
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -40,7 +40,7 @@ def _estimate_user_risk_level(fraud_rate: float) -> str:
     return "low"
 
 @router.get("/users/{user_id}")
-async def get_user(user_id: str) -> Dict[str, Any]:
+async def get_user(user_id: str, _user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))) -> Dict[str, Any]:
     """
     Lấy thông tin người dùng
 
@@ -98,7 +98,8 @@ async def get_user_transactions(
     limit: int = 20,
     offset: int = 0,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    _user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))
 ) -> Dict[str, Any]:
     """
     Lấy lịch sử giao dịch của người dùng
@@ -174,7 +175,7 @@ async def get_user_transactions(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/users/{user_id}/risk-profile")
-async def get_user_risk_profile(user_id: str) -> Dict[str, Any]:
+async def get_user_risk_profile(user_id: str, _user=Depends(require_role(["ANALYST", "ADMIN", "COMPLIANCE"]))) -> Dict[str, Any]:
     """
     Lấy hồ sơ rủi ro của người dùng
 
@@ -251,7 +252,7 @@ async def get_user_risk_profile(user_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/users/{user_id}/update-risk-profile")
-async def update_user_risk_profile(user_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+async def update_user_risk_profile(user_id: str, updates: Dict[str, Any], _user=Depends(require_role(["ADMIN"]))) -> Dict[str, Any]:
     """
     Cập nhật hồ sơ rủi ro của người dùng
 

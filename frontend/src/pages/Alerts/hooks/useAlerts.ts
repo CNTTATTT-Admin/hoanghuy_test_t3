@@ -43,14 +43,15 @@ function mapAlert(a: BackendAlert): AlertRecord {
   else if (score >= 0.40) riskLevel = 'medium'
 
   const statusMap: Record<string, AlertStatus> = {
-    open:           'open',
-    active:         'open',           // DB legacy default
-    investigating:  'investigating',
-    resolved:       'resolved',
-    acknowledged:   'resolved',       // DB legacy acknowledge
-    false_positive: 'false_positive',
-    closed:         'resolved',       // phòng trường hợp DB dùng 'closed'
-    blocked:        'blocked',        // giao dịch bị chặn tự động
+    open:            'open',
+    active:          'open',           // DB legacy default
+    investigating:   'investigating',
+    resolved:        'resolved',
+    acknowledged:    'resolved',       // DB legacy acknowledge
+    false_positive:  'false_positive',
+    closed:          'resolved',       // phòng trường hợp DB dùng 'closed'
+    blocked:         'blocked',        // giao dịch bị chặn tự động
+    confirmed_fraud: 'confirmed_fraud', // analyst xác nhận là fraud
   }
 
   // Fallback chain cho mã giao dịch — ưu tiên top-level (backend đã flatten)
@@ -63,12 +64,37 @@ function mapAlert(a: BackendAlert): AlertRecord {
     '—'
   )
 
+  const amount = Number(a.amount ?? a.details?.amount ?? 0)
+
+  // Lý do model flag — lấy từ details.reasons / explanation / shap_reasons
+  const modelExplanation: string[] = (
+    (a.details?.reasons as string[]) ??
+    (a.details?.explanation as string[]) ??
+    (a.details?.shap_reasons as string[]) ??
+    []
+  )
+
+  // Thời gian chờ xử lý (phút)
+  const createdTime = new Date(a.created_at).getTime()
+  const waitTimeMinutes = Math.max(0, Math.round((Date.now() - createdTime) / 60000))
+
+  // SLA status
+  const slaStatus: 'normal' | 'warning' | 'overdue' =
+    waitTimeMinutes >= 60 ? 'overdue' :
+    waitTimeMinutes >= 30 ? 'warning' : 'normal'
+
+  // Priority score (0–100): kết hợp risk, amount, thời gian chờ
+  const riskWeight   = score * 10 * 4                         // max 40
+  const amountWeight = Math.min(amount / 100_000, 30)         // max 30, chuẩn hoá theo 10tr
+  const timeWeight   = Math.min(waitTimeMinutes / 2, 30)      // max 30
+  const priorityScore = Math.round(Math.min(riskWeight + amountWeight + timeWeight, 100))
+
   return {
     id:        a.id ?? a.alert_id ?? '—',
     txId,
     // Loại bỏ a.type khỏi fallback — a.type là loại cảnh báo (FRAUD_DETECTED), không phải loại giao dịch
     txType:    normalizeTxType((a.details?.tx_type as string) ?? (a.details?.type as string)),
-    amount:    Number(a.amount ?? a.details?.amount ?? 0),
+    amount,
     nameOrig:  (a.details?.nameOrig as string) ?? (a.details?.name_orig as string) ?? '—',
     nameDest:  (a.details?.nameDest as string) ?? (a.details?.name_dest as string) ?? '—',
     riskLevel,
@@ -80,6 +106,10 @@ function mapAlert(a: BackendAlert): AlertRecord {
     }),
     assignee:  a.assigned_to ?? 'Chưa phân công',
     details:   a.details ?? {},
+    modelExplanation,
+    priorityScore,
+    waitTimeMinutes,
+    slaStatus,
   }
 }
 

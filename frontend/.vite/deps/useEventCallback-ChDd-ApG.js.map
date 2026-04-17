@@ -1,0 +1,1 @@
+{"version":3,"file":"useEventCallback-ChDd-ApG.js","names":[],"sources":["../../node_modules/@mui/material/esm/utils/useEventCallback.js"],"sourcesContent":["'use client';\n\nimport useEventCallback from '@mui/utils/useEventCallback';\nexport default useEventCallback;"],"x_google_ignoreList":[0],"mappings":";;AAGA,IAAA,2BAAe"}
