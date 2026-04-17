@@ -14,7 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class FraudDetectionService:
-    """Single backend service that delegates inference to the audited detector."""
+    """Single backend service that delegates inference to the audited detector.
+
+    Shares the same RealtimeFraudDetector instance with RealtimeCheckService
+    to ensure consistent behavioral state (_user_states) across endpoints.
+    """
 
     def __init__(self, model_dir: str | None = None):
         project_root = Path(__file__).resolve().parents[3]
@@ -22,15 +26,10 @@ class FraudDetectionService:
         if root_str not in sys.path:
             sys.path.insert(0, root_str)
 
-        from ml.realtime_inference import RealtimeFraudDetector  # pylint: disable=import-outside-toplevel
-
-        resolved_model_dir = model_dir or str(project_root / "models")
-        audit_path = str(project_root / "logs" / "fraud_audit.log")
-
-        self.detector = RealtimeFraudDetector(
-            model_dir=resolved_model_dir,
-            audit_log_path=audit_path,
-        )
+        # Import the shared detector from RealtimeCheckService (singleton)
+        # to avoid creating a second RealtimeFraudDetector with separate _user_states
+        from services.realtime_check_service import get_realtime_check_service  # pylint: disable=import-outside-toplevel
+        self.detector = get_realtime_check_service().detector
         self.notifier = get_notifier()
 
     # ── Rule-based precheck (trước khi gọi ML) ────────────────────────────
@@ -149,28 +148,6 @@ class FraudDetectionService:
             risk_level = str(detector_result["risk_level"])
             reasons = list(detector_result.get("reasons", []))
 
-            # Boost risk score dựa trên tín hiệu nghiệp vụ bổ sung
-            amount = float(transaction.get("amount", 0))
-            old_bal_org = float(transaction.get("oldbalanceOrg", 0))
-            old_bal_dest = float(transaction.get("oldbalanceDest", 0))
-            tx_type = str(transaction.get("type", "")).upper()
-
-            if old_bal_org > 0 and amount > 0:
-                ratio = amount / old_bal_org
-                if ratio >= 0.9 and tx_type in ("TRANSFER", "CASH_OUT"):
-                    boost = min(0.3, (ratio - 0.9) * 3.0)
-                    fraud_prob = min(1.0, fraud_prob + boost)
-                    reasons.append(f"Tỷ lệ rút/chuyển rất cao: {ratio:.1%} số dư tài khoản")
-
-            if old_bal_dest == 0 and amount > 100_000 and tx_type in ("TRANSFER", "CASH_OUT"):
-                fraud_prob = min(1.0, fraud_prob + 0.15)
-                reasons.append("Tài khoản đích chưa có số dư trước giao dịch")
-
-            if fraud_prob >= 0.75:
-                risk_level = "HIGH"
-            elif fraud_prob >= 0.35:
-                risk_level = "MEDIUM"
-
             transaction_id = str(transaction.get("transaction_id") or transaction.get("nameOrig", "unknown"))
             explanation = {
                 "prediction": fraud_prob,
@@ -182,7 +159,7 @@ class FraudDetectionService:
 
             result = {
                 "transaction_id": transaction_id,
-                "is_fraud": bool(fraud_prob >= 0.65),
+                "is_fraud": bool(detector_result.get("is_fraud", fraud_prob >= detector_result.get("decision_threshold", 0.02))),
                 "fraud_score": fraud_prob,
                 "model_score": fraud_prob,
                 "risk_level": risk_level,
@@ -192,9 +169,14 @@ class FraudDetectionService:
             }
 
             if result["is_fraud"]:
-                import asyncio
-
-                asyncio.create_task(self._send_fraud_alert(result))
+                # Note: _send_fraud_alert is handled by persist_alert_if_needed
+                # in the endpoint layer. Do NOT use asyncio.create_task here
+                # because detect_fraud() is sync and runs in a threadpool
+                # where there is no running event loop.
+                logger.info(
+                    "Fraud detected for %s — score=%.4f, will be alerted by endpoint layer",
+                    transaction_id, result["fraud_score"],
+                )
 
             logger.info(
                 "Fraud detection completed for transaction %s: fraud=%s, score=%.6f",
@@ -239,9 +221,9 @@ class FraudDetectionService:
         return ["Continue monitoring under normal controls"]
 
     def _confidence_label(self, probability: float) -> str:
-        if probability >= 0.05 or probability <= 0.001:
+        if probability >= 0.05:
             return "HIGH"
-        if probability >= 0.02 or probability <= 0.005:
+        if probability >= 0.005:
             return "MEDIUM"
         return "LOW"
 

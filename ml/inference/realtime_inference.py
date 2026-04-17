@@ -121,6 +121,13 @@ class RealtimeFraudDetector:
             resolved_model_dir,
         )
 
+        # Sync Redis client for behavioral state persistence (optional)
+        self._redis_sync: Any = None
+
+    def set_redis_sync(self, redis_client_sync: Any) -> None:
+        """Inject a sync Redis client for behavioral state persistence."""
+        self._redis_sync = redis_client_sync
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def seed_user_history(
@@ -235,12 +242,31 @@ class RealtimeFraudDetector:
     def _attach_behavioral_features(self, transaction: Dict[str, Any]) -> Dict[str, Any]:
         user_id = str(transaction.get("nameOrig", ""))
         if not user_id or "step" not in transaction or "amount" not in transaction:
+            logger.debug("[BEHAVIORAL] Skipped — missing nameOrig/step/amount")
             return transaction
 
         state = self._user_states.setdefault(user_id, OnlineFeatureState(user_id=user_id))
+        # Inject sync Redis client nếu có — cho phép persist behavioral state
+        if self._redis_sync is not None and state._redis_sync is None:
+            state.set_redis_sync(self._redis_sync)
         features = state.compute_features(
             current_step=float(transaction["step"]),
             current_amount=float(transaction["amount"]),
+        )
+
+        logger.info(
+            "[BEHAVIORAL] user=%s step=%s | tx_1h=%s total_24h=%.0f unique_7d=%s "
+            "time_since=%.1f freq_change=%.1f zscore=%.2f cold_start=%s | events_in_memory=%d",
+            user_id,
+            transaction["step"],
+            features.get("number_of_transactions_last_1h"),
+            features.get("total_amount_last_24h", 0),
+            features.get("unique_devices_or_accounts_last_7d"),
+            features.get("time_since_last_transaction", 0),
+            features.get("transaction_frequency_change", 0),
+            features.get("amount_zscore_user", 0),
+            features.get("is_cold_start"),
+            len(state._events),
         )
 
         # Cold-start: ghi đè bằng population stats nếu có

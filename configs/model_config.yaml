@@ -1,8 +1,8 @@
-calibration_method: isotonic
+calibration_method: none
 calibration_validation_size: 0.2
 random_state: 42
-prediction_threshold: 0.35
+prediction_threshold: 0.02
 threshold_selection: precision_at_recall
 target_recall: 0.70
-train_negative_multiplier: 8
+train_negative_multiplier: 4
 temporal_backtest_folds: 3

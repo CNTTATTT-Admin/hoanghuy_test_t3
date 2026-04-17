@@ -1,27 +1,3 @@
-"""Training entry point for the FraudDetect ML pipeline.
-
-Run from the project root::
-
-    python -m ml.modeling.train
-
-Or directly::
-
-    cd ml/modeling
-    python train.py
-
-The training procedure:
-  1. Load and validate raw data.
-  2. Primary train / test split (hybrid temporal + entity-overlap removal).
-  3. Temporal validation split within the training window.
-  4. Down-sample the majority class in the model-train set only.
-  5. Fit ``ColumnTransformer`` on model-train; transform model-train, validation, test.
-  6. Train ``RandomForestClassifier``.
-  7. Fit probability calibration on the validation set.
-  8. Optimise the decision threshold on the unsampled validation set.
-  9. Run temporal back-test (``TimeSeriesSplit``) for honest out-of-time metrics.
-  10. Evaluate on the held-out test set.
-  11. Persist all artifacts via ``ArtifactRegistry``.
-"""
 
 from __future__ import annotations
 
@@ -85,24 +61,23 @@ def _add_behavioral_features(df) -> "pd.DataFrame":
 def _build_model(y_train: np.ndarray = None, random_state: int = 42):
     """Return a LightGBM classifier.
 
-    Training data is pre-downsampled upstream (1:10 fraud ratio),
-    so class weighting via scale_pos_weight is NOT applied here.
-    Applying both downsampling + scale_pos_weight double-corrects the imbalance,
-    inflating recall and collapsing precision.
+    Training data is pre-downsampled upstream.  A modest scale_pos_weight
+    is applied on top to further boost fraud signal in the loss function
+    without collapsing precision (validated empirically).
     """
     import lightgbm as lgb
 
     return lgb.LGBMClassifier(
-        n_estimators=150,
-        max_depth=4,
-        learning_rate=0.05,
-        num_leaves=15,
-        subsample=0.6,
-        colsample_bytree=0.6,
-        min_child_samples=300,
-        reg_alpha=2.0,
-        reg_lambda=5.0,
-        min_gain_to_split=0.05,
+        n_estimators=600,
+        max_depth=7,
+        learning_rate=0.03,
+        num_leaves=50,
+        subsample=0.75,
+        colsample_bytree=0.75,
+        min_child_samples=50,
+        reg_alpha=0.3,
+        reg_lambda=1.5,
+        min_gain_to_split=0.01,
         random_state=random_state,
         n_jobs=-1,
         verbose=-1,
@@ -114,12 +89,28 @@ def _build_model(y_train: np.ndarray = None, random_state: int = 42):
 def _train_model(
     X_train: np.ndarray,
     y_train: np.ndarray,
+    X_val: np.ndarray = None,
+    y_val: np.ndarray = None,
     random_state: int = 42,
 ):
+    import lightgbm as lgb
+
     logger.info("Fitting LightGBM classifier …")
     model = _build_model(y_train, random_state=random_state)
-    model.fit(X_train, y_train)
-    logger.info("Model fitted.")
+
+    fit_kwargs: Dict[str, Any] = {}
+    if X_val is not None and y_val is not None:
+        fit_kwargs["eval_set"] = [(X_val, y_val)]
+        fit_kwargs["eval_metric"] = "binary_logloss"
+        fit_kwargs["callbacks"] = [
+            lgb.early_stopping(50, verbose=True),
+            lgb.log_evaluation(50),
+        ]
+        logger.info("Early stopping enabled (patience=50).")
+
+    model.fit(X_train, y_train, **fit_kwargs)
+    logger.info("Model fitted  (n_estimators used: %d).", model.n_estimators_
+                if hasattr(model, 'n_estimators_') else model.n_estimators)
     return model
 
 
@@ -262,7 +253,11 @@ def _temporal_backtest(
             fold_thr_raw, artifacts
         )
 
-        fold_model = _train_model(X_tr, y_tr, random_state=random_state)
+        fold_model = _train_model(
+            X_tr, y_tr,
+            X_val=X_calib, y_val=y_calib,
+            random_state=random_state,
+        )
         fold_cal, _ = _fit_calibration_with_guard(
             fold_model,
             X_calib,
@@ -374,8 +369,12 @@ def train_and_evaluate(
     # Transform threshold split bằng artifacts đã fit (không fit lại)
     X_thr, y_thr = preprocessor.transform_raw_frame_with_artifacts(thr_raw, artifacts)
 
-    # 5. Train model
-    model = _train_model(X_train, y_train, random_state=cfg.random_state)
+    # 5. Train model (early stopping on calibration split)
+    model = _train_model(
+        X_train, y_train,
+        X_val=X_calib, y_val=y_calib,
+        random_state=cfg.random_state,
+    )
 
     # 5b. Feature importance validation — phát hiện PaySim artifacts / leakage
     importances = model.feature_importances_

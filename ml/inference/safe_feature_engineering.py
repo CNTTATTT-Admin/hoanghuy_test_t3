@@ -11,12 +11,15 @@ transactions did this user make in the last hour?" must be computed from
 from __future__ import annotations
 
 import json
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 HOURS_1 = 1.0
 HOURS_24 = 24.0
@@ -75,13 +78,79 @@ class OnlineFeatureState:
     def __post_init__(self) -> None:
         # Redis client và memory fallback dict được khởi tạo sau dataclass init
         self._redis: Any = None       # redis.asyncio.Redis hoặc None
+        self._redis_sync: Any = None  # redis.Redis (sync) hoặc None
         self._memory: Dict[str, Any] = {}  # fallback store khi không có Redis
+        self._hydrated: bool = False  # True nếu đã load từ Redis/memory
 
     # ── Phương thức đặt Redis client sau khi khởi tạo ────────────────────────
 
     def set_redis(self, redis_client: Any) -> None:
         """Gắn Redis client vào state sau khi object đã được tạo."""
         self._redis = redis_client
+
+    def set_redis_sync(self, redis_client_sync: Any) -> None:
+        """Gắn sync Redis client để compute_features/update có thể persist."""
+        self._redis_sync = redis_client_sync
+
+    # ── Sync Redis hydration — load events từ Redis vào _events deque ────────
+
+    def _hydrate_if_needed(self) -> None:
+        """Load event history từ Redis (sync) vào _events nếu chưa load."""
+        if self._hydrated:
+            return
+        self._hydrated = True
+
+        if self._redis_sync is None:
+            logger.debug("[HYDRATE] user=%s — no sync Redis client, using in-memory only", self.user_id)
+            return
+
+        try:
+            redis_key = f"user_state:{self.user_id}"
+            raw = self._redis_sync.hgetall(redis_key)
+            if raw:
+                # decode_responses=True → keys are strings; fallback for bytes
+                amounts = json.loads(raw.get("amounts") or raw.get(b"amounts", "[]"))
+                steps = json.loads(raw.get("steps") or raw.get(b"steps", "[]"))
+                counterparties = json.loads(raw.get("counterparties") or raw.get(b"counterparties", "[]"))
+                self._events.clear()
+                for s, a, cp in zip(steps, amounts, counterparties):
+                    self._events.append((float(s), float(a), str(cp)))
+                logger.info(
+                    "[HYDRATE] user=%s — restored %d events from Redis",
+                    self.user_id, len(self._events),
+                )
+            else:
+                logger.debug("[HYDRATE] user=%s — no history in Redis (truly new user)", self.user_id)
+        except Exception as exc:
+            logger.warning("[HYDRATE] user=%s — Redis load failed, using in-memory: %s", self.user_id, exc)
+
+    def _persist_to_redis(self) -> None:
+        """Ghi _events hiện tại ra Redis (sync)."""
+        if self._redis_sync is None:
+            return
+        try:
+            # Trim to MAX_HISTORY before persisting
+            events_list = list(self._events)
+            if len(events_list) > self._MAX_HISTORY:
+                events_list = events_list[-self._MAX_HISTORY:]
+
+            amounts = [e[1] for e in events_list]
+            steps = [e[0] for e in events_list]
+            counterparties = [e[2] for e in events_list]
+
+            redis_key = f"user_state:{self.user_id}"
+            self._redis_sync.hset(redis_key, mapping={
+                "amounts": json.dumps(amounts),
+                "steps": json.dumps(steps),
+                "counterparties": json.dumps(counterparties),
+            })
+            self._redis_sync.expire(redis_key, self._REDIS_TTL)
+            logger.debug(
+                "[PERSIST] user=%s — saved %d events to Redis",
+                self.user_id, len(events_list),
+            )
+        except Exception as exc:
+            logger.warning("[PERSIST] user=%s — Redis save failed: %s", self.user_id, exc)
 
     # ── Async methods — Redis primary, memory fallback ────────────────────────
 
@@ -166,6 +235,7 @@ class OnlineFeatureState:
         Khi user chưa có lịch sử (cold-start), trả về COLD_START_DEFAULTS
         thay vì tất cả = 0 — tránh route vào leaf "safe" của model.
         """
+        self._hydrate_if_needed()
         self._evict_old(current_step)
 
         # Cold-start: user chưa có lịch sử giao dịch nào
@@ -219,6 +289,7 @@ class OnlineFeatureState:
     def update(self, step: float, amount: float, counterparty: str) -> None:
         """Record the current transaction in the state (call after scoring)."""
         self._events.append((step, amount, counterparty))
+        self._persist_to_redis()
 
     def _evict_old(self, current_step: float) -> None:
         """Remove events older than the longest window (7 days)."""

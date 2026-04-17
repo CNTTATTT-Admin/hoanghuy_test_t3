@@ -14,8 +14,8 @@ import pandas as pd
 
 from ml.inference.safe_feature_engineering import SAFE_TIME_FEATURE_COLUMNS
 
-_AMOUNT_NOISE_STD = 0.15
-_BEHAVIORAL_NOISE_STD = 0.25
+_AMOUNT_NOISE_STD = 0.05
+_BEHAVIORAL_NOISE_STD = 0.10
 _AMOUNT_RATIO_UPPER = 3.0
 
 # Canonical set of realtime-safe feature columns consumed by the model.
@@ -25,15 +25,20 @@ _AMOUNT_RATIO_UPPER = 3.0
 # không phải signal thực tế. Giữ trong pipeline để tính step_hour_of_day nếu cần
 # nhưng KHÔNG đưa vào model.
 REALTIME_SAFE_FEATURE_COLUMNS = [
-    # Amount features — giữ lại, noise injection mạnh hơn
+    # Amount features
     "amount",
     "amount_log1p",
     "amount_threshold_ratio",
     # Transaction type — signal thực tế (TRANSFER/CASH_OUT rủi ro hơn)
     "type",
-    # NOTE: balance_log1p_org, amount_balance_ratio, balance_log1p_dest,
-    # dest_is_empty đã bị loại bỏ — chúng là PaySim synthetic artifacts
-    # khiến model memorize simulation rules thay vì học fraud patterns thực.
+    # Interaction features — amount × type cross signals
+    "amount_x_transfer",
+    "amount_x_cashout",
+    # Behavioural interaction features
+    "amount_to_avg_ratio",
+    "large_amount_new_user",
+    # Destination pattern
+    "dest_is_merchant",
 ]
 
 # Post-transaction columns that are only known *after* a transaction settles.
@@ -164,6 +169,36 @@ def feature_engineering(
     # ── Time features ──────────────────────────────────────────────────────
     if "step" in working.columns:
         working["step_hour_of_day"] = working["step"] % 24
+
+    # ── Interaction features ───────────────────────────────────────────────
+    if "type" in working.columns:
+        working["amount_x_transfer"] = (
+            working["amount"] * (working["type"] == "TRANSFER").astype(float)
+        )
+        working["amount_x_cashout"] = (
+            working["amount"] * (working["type"] == "CASH_OUT").astype(float)
+        )
+
+    if "user_avg_amount" in working.columns:
+        working["amount_to_avg_ratio"] = (
+            working["amount"] / np.maximum(working["user_avg_amount"], 1.0)
+        ).clip(upper=10.0)
+    else:
+        working["amount_to_avg_ratio"] = 1.0
+
+    if "is_cold_start" in working.columns and "amount_threshold_ratio" in working.columns:
+        working["large_amount_new_user"] = (
+            working["is_cold_start"] * working["amount_threshold_ratio"]
+        )
+    else:
+        working["large_amount_new_user"] = 0.0
+
+    if "nameDest" in working.columns:
+        working["dest_is_merchant"] = (
+            working["nameDest"].astype(str).str.startswith("M").astype(int)
+        )
+    else:
+        working["dest_is_merchant"] = 0
 
     print(f"Features engineered: {[c for c in REALTIME_SAFE_FEATURE_COLUMNS if c in working.columns]}")
     return working, amount_threshold, amount_clip_value

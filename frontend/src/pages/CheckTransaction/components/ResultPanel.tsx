@@ -183,6 +183,58 @@ export function ResultPanel({ result, detail }: ResultPanelProps) {
         </Box>
       )}
 
+      {/* ── Account frozen banner ── */}
+      {result.accountStatus === 'frozen' && (
+        <Box
+          sx={{
+            bgcolor: '#1e1b4b',
+            border: '2px solid #6366f1',
+            borderRadius: '8px',
+            p: 2,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 1.5,
+          }}
+        >
+          <BlockIcon sx={{ color: '#a5b4fc', fontSize: 20, mt: 0.2, flexShrink: 0 }} />
+          <Box>
+            <Typography sx={{ color: '#c7d2fe', fontSize: '12px', fontWeight: 700, mb: 0.5 }}>
+              TÀI KHOẢN ĐÃ BỊ ĐÓNG BĂNG
+            </Typography>
+            <Typography sx={{ color: '#e0e7ff', fontSize: '13px', lineHeight: 1.6 }}>
+              Tài khoản này đã bị đóng băng tự động do phát hiện gian lận nghiêm trọng. Mọi giao dịch sẽ bị từ chối.
+            </Typography>
+          </Box>
+        </Box>
+      )}
+
+      {/* ── Repeat risk escalation warning ── */}
+      {(result.repeatCount ?? 0) > 1 && (
+        <Box
+          sx={{
+            bgcolor: '#451a0333',
+            border: '1px solid #92400e',
+            borderRadius: '8px',
+            p: 2,
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 1.5,
+          }}
+        >
+          <WarningAmberIcon sx={{ color: '#fbbf24', fontSize: 20, mt: 0.2, flexShrink: 0 }} />
+          <Box>
+            <Typography sx={{ color: '#fde68a', fontSize: '12px', fontWeight: 700, mb: 0.5 }}>
+              CẢNH BÁO GIAO DỊCH LẶP LẠI
+            </Typography>
+            <Typography sx={{ color: '#fef3c7', fontSize: '13px', lineHeight: 1.6 }}>
+              Giao dịch tương tự đã được thực hiện {result.repeatCount} lần.
+              Điểm rủi ro đã được tăng thêm +{result.repeatRiskBonus} điểm
+              (gốc: {result.baseRiskScore?.toFixed(0)} → cuối: {result.finalRiskScore?.toFixed(0)}).
+            </Typography>
+          </Box>
+        </Box>
+      )}
+
       {/* ── Top section — Risk gauge + info ── */}
       <Box
         sx={{

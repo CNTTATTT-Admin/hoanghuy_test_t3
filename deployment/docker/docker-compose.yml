@@ -11,6 +11,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://user:password@postgres:5432/frauddetect
       - REDIS_URL=redis://redis:6379
+      - ENABLE_REDIS=true
     depends_on:
       - postgres
       - redis
